@@ -1,1 +1,1 @@
-"""Tests for the EGGROLL optimiser wrapper."""
+"""Tests for the EGGROLL integration layer (primitives and training utilities)."""
