@@ -53,6 +53,10 @@ yarn-error.log*
 *.log
 logs/
 
+# Hydra outputs
+outputs/
+multirun/
+
 # OS
 Thumbs.db
 ehthumbs.db

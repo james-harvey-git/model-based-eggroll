@@ -1,0 +1,5 @@
+# @package _global_
+defaults:
+  - override /dataset: halfcheetah_medium
+  - override /world_model: eggroll_ensemble
+  - override /algorithm: eggroll

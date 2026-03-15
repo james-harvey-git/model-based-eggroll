@@ -1,0 +1,3 @@
+_target_: mbrl.world_models.mle.MLEEnsemble
+
+num_members: 7

@@ -1,0 +1,7 @@
+_target_: mbrl.algorithms.eggroll.train
+
+eggroll:
+  population_size: 256
+  sigma: 0.01
+rollout_length: 200
+num_generations: 500

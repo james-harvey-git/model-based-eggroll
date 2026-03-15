@@ -1,0 +1,5 @@
+_target_: mbrl.algorithms.mopo.train
+
+penalty_coeff: 1.0
+rollout_length: 5
+num_policy_updates: 1000

@@ -1,0 +1,8 @@
+defaults:
+  - dataset: halfcheetah_medium
+  - world_model: mle
+  - algorithm: mopo
+  - networks: mlp
+  - _self_
+
+seed: 0

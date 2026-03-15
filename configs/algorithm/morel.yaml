@@ -1,0 +1,4 @@
+_target_: mbrl.algorithms.morel.train
+
+threshold: 0.5
+num_policy_updates: 1000

@@ -1,0 +1,2 @@
+hidden_dims: [256, 256]
+activation: relu

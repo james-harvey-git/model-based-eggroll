@@ -1,0 +1,6 @@
+_target_: mbrl.world_models.eggroll.EGGROLLEnsemble
+
+num_members: 7
+eggroll:
+  population_size: 256
+  sigma: 0.01
