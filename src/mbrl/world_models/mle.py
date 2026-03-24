@@ -7,12 +7,11 @@ https://github.com/EmptyJackson/unifloral (algorithms/dynamics.py)
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from flax.core import frozen_dict
 from flax.training.train_state import TrainState
 import optax
 from omegaconf import DictConfig
 
-from mbrl.data import Transition, train_val_split
+from mbrl.data import Transition, create_epoch_iterator, train_val_split
 from mbrl.world_models.base import EnsembleDynamics
 from mbrl.world_models.termination_fns import get_termination_fn
 
@@ -82,18 +81,6 @@ class EnsembleDynamicsModel(nn.Module):
 # Training utilities (ported from Unifloral)
 # ---------------------------------------------------------------------------
 
-def _create_batch_iter(rng, inputs, targets, batch_size):
-    """Shuffle and reshape (inputs, targets) into (num_batches, batch_size, ...) for scanning."""
-    perm = jax.random.permutation(rng, inputs.shape[0])
-    shuffled_inputs, shuffled_targets = inputs[perm], targets[perm]
-    num_batches = inputs.shape[0] // batch_size
-    iter_size = num_batches * batch_size
-    return jax.tree.map(
-        lambda x: x[:iter_size].reshape(num_batches, batch_size, *x.shape[1:]),
-        (shuffled_inputs, shuffled_targets),
-    )
-
-
 def _train_dynamics(train_state, cfg, train_inputs, train_targets, val_inputs, val_targets, rng):
     """Train the ensemble and return (train_state, elite_idxs).
 
@@ -137,9 +124,9 @@ def _train_dynamics(train_state, cfg, train_inputs, train_targets, val_inputs, v
     def train_epoch(_, carry):
         rng, train_state, elite_idxs = carry
         rng, rng_train, rng_val = jax.random.split(rng, 3)
-        train_iter = _create_batch_iter(rng_train, train_inputs, train_targets, batch_size)
+        train_iter = create_epoch_iterator((train_inputs, train_targets), batch_size, rng_train)
         train_state = jax.lax.scan(_train_step, train_state, train_iter)[0]
-        val_iter = _create_batch_iter(rng_val, val_inputs, val_targets, batch_size)
+        val_iter = create_epoch_iterator((val_inputs, val_targets), batch_size, rng_val)
         val_loss = jax.lax.scan(_eval_step, train_state, val_iter)[1]
         # Select elite members: lowest mean validation MSE across batches
         elite_idxs = val_loss.mean(axis=0).argsort()[:num_elites]
@@ -209,14 +196,21 @@ class MLEEnsemble(EnsembleDynamics):
             train_state, cfg, train_inputs, train_targets, val_inputs, val_targets, train_rng
         )
 
-        # Prune non-elite params and resize model (matching Unifloral lines 135-147)
-        params = frozen_dict.unfreeze(train_state.params)
+        # Prune non-elite params and create fresh model sized to elites only
+        # (matching Unifloral lines 135-147, but avoiding mutable module mutation)
+        params = jax.tree.map(lambda x: x, train_state.params)  # deep copy
         ensemble_params = params["params"]["ensemble"]
         ensemble_params = jax.tree.map(lambda p: p[elite_idxs], ensemble_params)
         params["params"]["ensemble"] = ensemble_params
-        self.params = frozen_dict.freeze(params)
+        self.params = params
         self.num_elites = len(elite_idxs)
-        self.model.num_ensemble = self.num_elites
+        self.model = EnsembleDynamicsModel(
+            obs_dim=self.obs_dim,
+            action_dim=self.act_dim,
+            num_ensemble=self.num_elites,
+            n_layers=self.model.n_layers,
+            layer_size=self.model.layer_size,
+        )
 
     def step(
         self,
@@ -225,7 +219,7 @@ class MLEEnsemble(EnsembleDynamics):
         rng: jax.Array,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """Sample (next_obs, reward, done) from a randomly selected elite member."""
-        rng_model, rng_elite, rng_noise = jax.random.split(rng, 3)
+        rng_elite, rng_noise = jax.random.split(rng)
 
         obs_action = jnp.concatenate([obs, action], axis=-1)
         # Forward pass through all elites (params already pruned to elites only)

@@ -127,6 +127,13 @@ class TestTerminationFns:
         next_obs = jnp.ones(OBS_DIM) * 200.0
         assert termination_fn_halfcheetah(obs, act, next_obs)
 
+    def test_hopper_out_of_bounds(self):
+        obs = jnp.zeros(OBS_DIM)
+        act = jnp.zeros(ACT_DIM)
+        # next_obs[1:] values outside ±100 should trigger termination
+        next_obs = jnp.zeros(OBS_DIM).at[1].set(-200.0)
+        assert termination_fn_hopper(obs, act, next_obs)
+
     def test_dispatcher(self):
         assert get_termination_fn("mujoco/halfcheetah/medium-v0") is termination_fn_halfcheetah
         assert get_termination_fn("mujoco/hopper/medium-v0") is termination_fn_hopper

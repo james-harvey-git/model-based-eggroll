@@ -24,7 +24,7 @@ def termination_fn_hopper(obs, act, next_obs):
     angle = next_obs[1]
     not_done = (
         jnp.isfinite(next_obs).all()
-        * jnp.abs(next_obs[1:] < 100).all()
+        * (jnp.abs(next_obs[1:]) < 100).all()  # fix: Unifloral has wrong precedence here
         * (height > 0.7)
         * (jnp.abs(angle) < 0.2)
     )
