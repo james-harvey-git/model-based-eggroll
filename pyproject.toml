@@ -8,7 +8,7 @@ dependencies = [
     "jax>=0.9.1",
     "hydra-core>=1.3",
     "omegaconf>=2.3",
-    "minari>=0.5.3",
+    "minari[hdf5,hf]>=0.5.3",
     "gymnasium>=1.2.3",
     "gymnasium-robotics>=1.4.2",
 ]
