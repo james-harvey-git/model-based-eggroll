@@ -1,22 +1,33 @@
-"""Shared ensemble world model interface.
+"""Shared ensemble world model interface."""
 
-Adapted from Unifloral dynamics.py (https://github.com/EmptyJackson/unifloral).
-This module defines the data structures and interface that all world model
-training methods (MLE, EGGROLL) implement.
-"""
+from abc import ABC, abstractmethod
+
+import jax
+import jax.numpy as jnp
+from omegaconf import DictConfig
+
+from mbrl.data import Transition
 
 
-class EnsembleDynamics:
-    """Abstract ensemble dynamics model.
+class EnsembleDynamics(ABC):
+    """Abstract base class for ensemble dynamics models.
 
-    All world model training methods should produce an object satisfying
-    this interface so that policy training algorithms are method-agnostic.
+    All world model training methods (MLE, EGGROLL) implement this interface so
+    that policy training algorithms are agnostic to how the world model was trained.
     """
 
-    def step(self, obs, action, rng):
-        """Return (next_obs, reward, terminal) sampled from the ensemble."""
-        raise NotImplementedError
+    @abstractmethod
+    def step(
+        self,
+        obs: jnp.ndarray,     # (obs_dim,)
+        action: jnp.ndarray,  # (act_dim,)
+        rng: jax.Array,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Sample (next_obs, reward, done) from the ensemble.
 
-    def train(self, dataset, cfg, rng):
+        Operates on a single (obs, action) pair. Callers vmap over batches.
+        """
+
+    @abstractmethod
+    def train(self, dataset: Transition, cfg: DictConfig, rng: jax.Array) -> None:
         """Fit the ensemble to the provided offline dataset."""
-        raise NotImplementedError

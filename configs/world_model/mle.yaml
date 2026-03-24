@@ -1,3 +1,17 @@
 _target_: mbrl.world_models.mle.MLEEnsemble
 
-num_members: 7
+# Ensemble
+num_ensemble: 7
+num_elites: 5
+
+# Network architecture
+n_layers: 4
+layer_size: 200
+
+# Training
+num_epochs: 400
+lr: 0.001
+batch_size: 256
+weight_decay: 2.5e-5
+logvar_diff_coef: 0.01
+validation_split: 0.2
