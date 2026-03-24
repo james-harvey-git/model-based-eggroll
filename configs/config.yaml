@@ -6,6 +6,8 @@ defaults:
   - _self_
 
 seed: 0
+stage: all
+checkpoint_dir: checkpoints
 
 eval:
   num_episodes: 10

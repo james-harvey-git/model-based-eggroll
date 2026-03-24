@@ -11,6 +11,7 @@ dependencies = [
     "minari[hdf5,hf]>=0.5.3",
     "gymnasium>=1.2.3",
     "gymnasium-robotics>=1.4.2",
+    "wandb>=0.25.1",
 ]
 
 [dependency-groups]
