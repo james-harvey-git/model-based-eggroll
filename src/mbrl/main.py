@@ -27,7 +27,7 @@ def main(cfg: DictConfig) -> None:
         if cfg.stage in ("policy", "all"):
             experiments.policy.run(cfg, logger)
         if cfg.stage in ("eval", "all"):
-            experiments.evaluation.run(cfg, logger)
+            experiments.evaluate.run(cfg, logger)
     finally:
         logger.finish()
 

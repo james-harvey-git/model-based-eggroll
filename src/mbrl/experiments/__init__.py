@@ -1,5 +1,5 @@
 """Experiment stages: world_model, policy, evaluation."""
 
-from mbrl.experiments import evaluation, policy, world_model
+from mbrl.experiments import evaluate, policy, world_model
 
-__all__ = ["world_model", "policy", "evaluation"]
+__all__ = ["world_model", "policy", "evaluate"]
