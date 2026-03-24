@@ -84,16 +84,15 @@ def sample_batch(dataset: Transition, batch_size: int, rng: jax.Array) -> Transi
     return jax.tree.map(lambda x: x[idxs], dataset)
 
 
-def create_epoch_iterator(
-    dataset: Transition, batch_size: int, rng: jax.Array
-) -> Transition:
-    """Shuffle dataset and reshape into (num_batches, batch_size, ...) for scanning.
+def create_epoch_iterator(data, batch_size: int, rng: jax.Array):
+    """Shuffle a pytree of arrays and reshape into (num_batches, batch_size, ...) for scanning.
 
-    Drops trailing transitions that don't fill a complete batch.
+    Works with any pytree (Transition, tuple of arrays, etc.) where all leaves share
+    the same leading dimension. Drops trailing elements that don't fill a complete batch.
     """
-    n = dataset.obs.shape[0]
+    n = jax.tree.leaves(data)[0].shape[0]
     perm = jax.random.permutation(rng, n)
-    shuffled = jax.tree.map(lambda x: x[perm], dataset)
+    shuffled = jax.tree.map(lambda x: x[perm], data)
     num_batches = n // batch_size
     iter_size = num_batches * batch_size
     return jax.tree.map(

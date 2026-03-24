@@ -12,6 +12,8 @@ dependencies = [
     "gymnasium>=1.2.3",
     "gymnasium-robotics>=1.4.2",
     "wandb>=0.25.1",
+    "optax>=0.2.8",
+    "flax>=0.12.6",
 ]
 
 [dependency-groups]

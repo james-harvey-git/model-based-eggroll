@@ -1,11 +1,10 @@
 """EGGROLL-trained ensemble world model.
 
-Uses the EGGROLL evolution strategy (see mbrl.optimisers.eggroll) in place of
-gradient-based MLE to fit the ensemble to offline D4RL data.
+Uses the EGGROLL evolution strategy in place of gradient-based MLE to fit the
+ensemble to offline data. Full implementation deferred to Phase 4/5.
 """
 
 from mbrl.world_models.base import EnsembleDynamics
-from mbrl.optimisers.eggroll import EGGROLLOptimiser
 
 
 class EGGROLLEnsemble(EnsembleDynamics):
