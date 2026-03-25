@@ -3,7 +3,6 @@
 from typing import Any, cast
 
 from omegaconf import DictConfig, OmegaConf
-
 import wandb
 
 # ---------------------------------------------------------------------------
