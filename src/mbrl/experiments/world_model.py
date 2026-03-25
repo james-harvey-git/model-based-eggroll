@@ -7,7 +7,7 @@ import jax
 from omegaconf import DictConfig, OmegaConf
 
 from mbrl.data import load_dataset
-from mbrl.logging import Logger
+from mbrl.logger import Logger
 from mbrl.world_models.mle import MLEEnsemble
 
 

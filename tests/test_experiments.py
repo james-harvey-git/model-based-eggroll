@@ -11,7 +11,7 @@ from omegaconf import OmegaConf
 
 from mbrl.data import DatasetInfo, Transition
 from mbrl.experiments import world_model as world_model_exp
-from mbrl.logging import Logger
+from mbrl.logger import Logger
 
 DATASET_ID = "mujoco/halfcheetah/medium-v0"
 OBS_DIM = 4
