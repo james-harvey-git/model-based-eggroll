@@ -22,7 +22,7 @@ jobs:
         run: uv sync
 
       - name: Ruff
-        run: uv run ruff check
+        run: uv run ruff check --show-fixes
 
       - name: Pyright
         run: uv run pyright
