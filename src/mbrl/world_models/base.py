@@ -1,6 +1,7 @@
 """Shared ensemble world model interface."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
@@ -29,5 +30,11 @@ class EnsembleDynamics(ABC):
         """
 
     @abstractmethod
-    def train(self, dataset: Transition, cfg: DictConfig, rng: jax.Array) -> None:
+    def train(
+        self,
+        dataset: Transition,
+        cfg: DictConfig,
+        rng: jax.Array,
+        log_fn: Callable[..., None] | None = None,
+    ) -> None:
         """Fit the ensemble to the provided offline dataset."""

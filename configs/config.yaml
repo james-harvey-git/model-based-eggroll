@@ -9,5 +9,8 @@ seed: 0
 stage: all
 checkpoint_dir: checkpoints
 
+wandb:
+  enabled: true
+
 eval:
   num_episodes: 10
