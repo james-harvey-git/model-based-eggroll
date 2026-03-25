@@ -4,6 +4,8 @@ Closely follows the Unifloral dynamics.py implementation:
 https://github.com/EmptyJackson/unifloral (algorithms/dynamics.py)
 """
 
+from typing import cast
+
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
@@ -50,7 +52,7 @@ class EnsembleDynamicsModel(nn.Module):
             SingleDynamicsModel,
             variable_axes={"params": 0},
             split_rngs={"params": True},
-            in_axes=None,
+            in_axes=None,  # type: ignore[arg-type]  # Flax stubs incorrectly require int
             out_axes=0,
             axis_size=self.num_ensemble,
         )
@@ -219,11 +221,16 @@ class MLEEnsemble(EnsembleDynamics):
         rng: jax.Array,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """Sample (next_obs, reward, done) from a randomly selected elite member."""
+        assert self.params is not None, "Model must be trained before calling step()"
+        assert self.num_elites is not None, "Model must be trained before calling step()"
         rng_elite, rng_noise = jax.random.split(rng)
 
         obs_action = jnp.concatenate([obs, action], axis=-1)
         # Forward pass through all elites (params already pruned to elites only)
-        ensemble_mean, ensemble_logvar = self.model.apply(self.params, obs_action)
+        # cast: Flax's apply() stubs have an overly broad return type
+        ensemble_mean, ensemble_logvar = cast(
+            tuple[jax.Array, jax.Array], self.model.apply(self.params, obs_action)
+        )
         ensemble_std = jnp.exp(0.5 * ensemble_logvar)
 
         # Randomly select one elite member

@@ -1,5 +1,7 @@
 """W&B logger. Domain-specific log methods are stubbed until training loops exist."""
 
+from typing import Any, cast
+
 import wandb
 from omegaconf import DictConfig, OmegaConf
 
@@ -11,7 +13,7 @@ class Logger:
         wandb.init(
             project="model-based-eggroll",
             entity="model-based-eggroll",
-            config=OmegaConf.to_container(cfg, resolve=True),
+            config=cast(dict[str, Any], OmegaConf.to_container(cfg, resolve=True)),
         )
 
     def finish(self) -> None:
