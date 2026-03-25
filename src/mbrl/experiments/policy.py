@@ -2,7 +2,7 @@
 
 from omegaconf import DictConfig
 
-from mbrl.logging import Logger
+from mbrl.logger import Logger
 
 
 def run(cfg: DictConfig, logger: Logger) -> None:

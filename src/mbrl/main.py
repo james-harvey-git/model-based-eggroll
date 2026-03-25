@@ -15,7 +15,7 @@ import hydra
 from omegaconf import DictConfig
 
 from mbrl import experiments
-from mbrl.logging import Logger
+from mbrl.logger import Logger
 
 
 @hydra.main(version_base=None, config_path="../../configs", config_name="config")

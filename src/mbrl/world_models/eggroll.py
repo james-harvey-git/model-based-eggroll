@@ -13,5 +13,5 @@ class EGGROLLEnsemble(EnsembleDynamics):
     def step(self, obs, action, rng):
         raise NotImplementedError
 
-    def train(self, dataset, cfg, rng):
+    def train(self, dataset, cfg, rng, log_fn=None):
         raise NotImplementedError

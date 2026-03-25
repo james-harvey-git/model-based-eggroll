@@ -3,8 +3,8 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from omegaconf import OmegaConf
+import pytest
 
 from mbrl.data import Transition
 from mbrl.world_models.mle import EnsembleDynamicsModel, MLEEnsemble
@@ -90,6 +90,23 @@ class TestEnsembleDynamicsModel:
 
 
 class TestMLEEnsembleTraining:
+    def test_train_calls_log_fn(self, synthetic_dataset):
+        model = MLEEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
+        log_calls: list[dict] = []
+
+        def log_fn(epoch, train_loss, val_mse):
+            log_calls.append(
+                {"epoch": int(epoch), "train_loss": float(train_loss), "val_mse": float(val_mse)}
+            )
+
+        model.train(synthetic_dataset, FAST_CFG, jax.random.key(42), log_fn=log_fn)
+        jax.effects_barrier()  # flush async callbacks before asserting
+
+        assert len(log_calls) == FAST_CFG.num_epochs
+        assert all(c["epoch"] == i for i, c in enumerate(log_calls))
+        assert all("train_loss" in c for c in log_calls)
+        assert all("val_mse" in c for c in log_calls)
+
     def test_train_completes(self, synthetic_dataset):
         model = MLEEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
         model.train(synthetic_dataset, FAST_CFG, jax.random.key(42))

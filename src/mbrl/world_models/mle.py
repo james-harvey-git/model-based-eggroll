@@ -4,14 +4,15 @@ Closely follows the Unifloral dynamics.py implementation:
 https://github.com/EmptyJackson/unifloral (algorithms/dynamics.py)
 """
 
+from collections.abc import Callable
 from typing import cast
 
 import flax.linen as nn
+from flax.training.train_state import TrainState
 import jax
 import jax.numpy as jnp
-import optax
-from flax.training.train_state import TrainState
 from omegaconf import DictConfig
+import optax
 
 from mbrl.data import Transition, create_epoch_iterator, train_val_split
 from mbrl.world_models.base import EnsembleDynamics
@@ -84,7 +85,9 @@ class EnsembleDynamicsModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-def _train_dynamics(train_state, cfg, train_inputs, train_targets, val_inputs, val_targets, rng):
+def _train_dynamics(
+    train_state, cfg, train_inputs, train_targets, val_inputs, val_targets, rng, log_fn=None
+):
     """Train the ensemble and return (train_state, elite_idxs).
 
     Ported from Unifloral's train_dynamics_model function.
@@ -108,9 +111,9 @@ def _train_dynamics(train_state, cfg, train_inputs, train_targets, val_inputs, v
             loss = mse_loss + var_loss + logvar_diff_coef * logvar_diff
             return loss, {"loss": loss, "mse_loss": mse_loss, "var_loss": var_loss}
 
-        grads, _ = jax.grad(_loss_fn, has_aux=True)(train_state.params)
+        grads, aux = jax.grad(_loss_fn, has_aux=True)(train_state.params)
         train_state = train_state.apply_gradients(grads=grads)
-        return train_state, None
+        return train_state, aux["loss"]
 
     def _eval_step(train_state, batch):
         inputs, targets = batch
@@ -124,15 +127,23 @@ def _train_dynamics(train_state, cfg, train_inputs, train_targets, val_inputs, v
         loss = _loss_fn(train_state.params)
         return train_state, loss
 
-    def train_epoch(_, carry):
+    def train_epoch(epoch, carry):
         rng, train_state, elite_idxs = carry
         rng, rng_train, rng_val = jax.random.split(rng, 3)
+
         train_iter = create_epoch_iterator((train_inputs, train_targets), batch_size, rng_train)
-        train_state = jax.lax.scan(_train_step, train_state, train_iter)[0]
+        train_state, batch_losses = jax.lax.scan(_train_step, train_state, train_iter)
+
         val_iter = create_epoch_iterator((val_inputs, val_targets), batch_size, rng_val)
-        val_loss = jax.lax.scan(_eval_step, train_state, val_iter)[1]
+        _, val_losses = jax.lax.scan(_eval_step, train_state, val_iter)
+
         # Select elite members: lowest mean validation MSE across batches
-        elite_idxs = val_loss.mean(axis=0).argsort()[:num_elites]
+        val_mse_per_member = val_losses.mean(axis=0)  # (num_ensemble,)
+        elite_idxs = val_mse_per_member.argsort()[:num_elites]
+
+        if log_fn is not None:
+            jax.debug.callback(log_fn, epoch, batch_losses.mean(), val_mse_per_member.mean())
+
         return rng, train_state, elite_idxs
 
     dummy_elite_idxs = jnp.zeros((num_elites,), jnp.int32)
@@ -166,7 +177,13 @@ class MLEEnsemble(EnsembleDynamics):
         self.params = None  # populated by train()
         self.num_elites = None  # populated by train()
 
-    def train(self, dataset: Transition, cfg: DictConfig, rng: jax.Array) -> None:
+    def train(
+        self,
+        dataset: Transition,
+        cfg: DictConfig,
+        rng: jax.Array,
+        log_fn: Callable[..., None] | None = None,
+    ) -> None:
         """Fit the ensemble to the offline dataset via NLL minimisation."""
         rng, split_rng, init_rng = jax.random.split(rng, 3)
 
@@ -195,12 +212,13 @@ class MLEEnsemble(EnsembleDynamics):
         # Train
         rng, train_rng = jax.random.split(rng)
         train_state, elite_idxs = _train_dynamics(
-            train_state, cfg, train_inputs, train_targets, val_inputs, val_targets, train_rng
+            train_state, cfg, train_inputs, train_targets, val_inputs, val_targets, train_rng,
+            log_fn=log_fn,
         )
 
         # Prune non-elite params and create fresh model sized to elites only
         # (matching Unifloral lines 135-147, but avoiding mutable module mutation)
-        params = jax.tree.map(lambda x: x, train_state.params)  # deep copy
+        params = jax.tree.map(lambda x: x, train_state.params)  # copy
         ensemble_params = params["params"]["ensemble"]
         ensemble_params = jax.tree.map(lambda p: p[elite_idxs], ensemble_params)
         params["params"]["ensemble"] = ensemble_params
