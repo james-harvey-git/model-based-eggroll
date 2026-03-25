@@ -10,11 +10,12 @@ class Logger:
     """Thin wrapper around W&B. Passed into each experiment stage."""
 
     def __init__(self, cfg: DictConfig) -> None:
-        self.enabled: bool = cfg.get("wandb", {}).get("enabled", True)  # type: ignore[union-attr]
+        wandb_cfg = cfg.get("wandb", {})
+        self.enabled: bool = wandb_cfg.get("enabled", False)  # type: ignore[union-attr]
         if self.enabled:
             wandb.init(
                 project="model-based-eggroll",
-                entity="model-based-eggroll",
+                entity=wandb_cfg.get("entity", "model-based-eggroll"),  # type: ignore[union-attr]
                 config=cast(dict[str, Any], OmegaConf.to_container(cfg, resolve=True)),
             )
 

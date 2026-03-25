@@ -218,7 +218,7 @@ class MLEEnsemble(EnsembleDynamics):
 
         # Prune non-elite params and create fresh model sized to elites only
         # (matching Unifloral lines 135-147, but avoiding mutable module mutation)
-        params = jax.tree.map(lambda x: x, train_state.params)  # deep copy
+        params = jax.tree.map(lambda x: x, train_state.params)  # copy
         ensemble_params = params["params"]["ensemble"]
         ensemble_params = jax.tree.map(lambda p: p[elite_idxs], ensemble_params)
         params["params"]["ensemble"] = ensemble_params

@@ -100,6 +100,7 @@ class TestMLEEnsembleTraining:
             )
 
         model.train(synthetic_dataset, FAST_CFG, jax.random.key(42), log_fn=log_fn)
+        jax.effects_barrier()  # flush async callbacks before asserting
 
         assert len(log_calls) == FAST_CFG.num_epochs
         assert all(c["epoch"] == i for i, c in enumerate(log_calls))

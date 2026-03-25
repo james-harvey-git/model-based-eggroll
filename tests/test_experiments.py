@@ -3,6 +3,7 @@
 import pickle
 from unittest.mock import patch
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -61,25 +62,24 @@ def run_cfg(tmp_path):
     )
 
 
+@pytest.fixture
+def trained_checkpoint(run_cfg, synthetic_dataset, tmp_path):
+    """Run the experiment once and return the checkpoint path."""
+    dataset, info = synthetic_dataset
+    logger = Logger(run_cfg)
+
+    with patch("mbrl.experiments.world_model.load_dataset", return_value=(dataset, info)):
+        world_model_exp.run(run_cfg, logger)
+
+    return tmp_path / "world_model.pkl"
+
+
 class TestWorldModelRun:
-    def test_checkpoint_saved(self, run_cfg, synthetic_dataset, tmp_path):
-        dataset, info = synthetic_dataset
-        logger = Logger(run_cfg)
+    def test_checkpoint_saved(self, trained_checkpoint):
+        assert trained_checkpoint.exists()
 
-        with patch("mbrl.experiments.world_model.load_dataset", return_value=(dataset, info)):
-            world_model_exp.run(run_cfg, logger)
-
-        checkpoint_path = tmp_path / "world_model.pkl"
-        assert checkpoint_path.exists()
-
-    def test_checkpoint_contents(self, run_cfg, synthetic_dataset, tmp_path):
-        dataset, info = synthetic_dataset
-        logger = Logger(run_cfg)
-
-        with patch("mbrl.experiments.world_model.load_dataset", return_value=(dataset, info)):
-            world_model_exp.run(run_cfg, logger)
-
-        with open(tmp_path / "world_model.pkl", "rb") as f:
+    def test_checkpoint_contents(self, trained_checkpoint, run_cfg):
+        with open(trained_checkpoint, "rb") as f:
             ckpt = pickle.load(f)
 
         assert "params" in ckpt
@@ -90,19 +90,19 @@ class TestWorldModelRun:
         assert ckpt["dataset_id"] == DATASET_ID
         assert ckpt["params"] is not None
 
-    def test_log_fn_called_each_epoch(self, run_cfg, synthetic_dataset, tmp_path):
+    def test_log_fn_called_each_epoch(self, run_cfg, synthetic_dataset):
         dataset, info = synthetic_dataset
         log_calls: list[dict] = []
 
-        # Subclass Logger to intercept log_world_model_step without W&B
         class SpyLogger(Logger):
-            def log_world_model_step(self, epoch: int, **metrics) -> None:
+            def log_world_model_step(self, epoch: int, **metrics: float) -> None:
                 log_calls.append({"epoch": epoch, **metrics})
 
         logger = SpyLogger(run_cfg)
 
         with patch("mbrl.experiments.world_model.load_dataset", return_value=(dataset, info)):
             world_model_exp.run(run_cfg, logger)
+        jax.effects_barrier()  # flush async callbacks before asserting
 
         assert len(log_calls) == run_cfg.world_model.num_epochs
         assert all("train_loss" in c for c in log_calls)

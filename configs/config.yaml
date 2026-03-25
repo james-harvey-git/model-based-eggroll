@@ -10,7 +10,8 @@ stage: all
 checkpoint_dir: checkpoints
 
 wandb:
-  enabled: true
+  enabled: false
+  entity: model-based-eggroll
 
 eval:
   num_episodes: 10
