@@ -3,8 +3,8 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from omegaconf import OmegaConf
+import pytest
 
 from mbrl.data import Transition
 from mbrl.world_models.mle import EnsembleDynamicsModel, MLEEnsemble

@@ -6,8 +6,8 @@ from unittest.mock import patch
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from omegaconf import OmegaConf
+import pytest
 
 from mbrl.data import DatasetInfo, Transition
 from mbrl.experiments import world_model as world_model_exp

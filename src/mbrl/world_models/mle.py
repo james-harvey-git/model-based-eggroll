@@ -8,11 +8,11 @@ from collections.abc import Callable
 from typing import cast
 
 import flax.linen as nn
+from flax.training.train_state import TrainState
 import jax
 import jax.numpy as jnp
-import optax
-from flax.training.train_state import TrainState
 from omegaconf import DictConfig
+import optax
 
 from mbrl.data import Transition, create_epoch_iterator, train_val_split
 from mbrl.world_models.base import EnsembleDynamics

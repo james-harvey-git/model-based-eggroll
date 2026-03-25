@@ -1,7 +1,7 @@
 """World model training experiment."""
 
-import pickle
 from pathlib import Path
+import pickle
 
 import jax
 from omegaconf import DictConfig, OmegaConf
