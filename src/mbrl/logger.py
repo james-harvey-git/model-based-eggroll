@@ -1,6 +1,6 @@
 """W&B logger. Domain-specific log methods are stubbed until training loops exist."""
 
-from typing import Any, cast
+from typing import Any, cast  # noqa: I001
 
 from omegaconf import DictConfig, OmegaConf
 import wandb
