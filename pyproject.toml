@@ -20,6 +20,7 @@ dependencies = [
 dev = [
     "pyright>=1.1.408",
     "pytest>=9.0.2",
+    "ruff>=0.15.7",
 ]
 
 [tool.uv]
@@ -31,3 +32,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mbrl"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I"]

@@ -2,7 +2,6 @@
 
 from omegaconf import DictConfig
 
-from mbrl.evaluation import compute_normalized_score, evaluate_policy
 from mbrl.logging import Logger
 
 

@@ -28,9 +28,7 @@ class DatasetInfo(NamedTuple):
     dataset_id: str
 
 
-def load_dataset(
-    dataset_id: str, download: bool = True
-) -> tuple[Transition, DatasetInfo]:
+def load_dataset(dataset_id: str, download: bool = True) -> tuple[Transition, DatasetInfo]:
     """Load a Minari dataset and return flat transitions with normalization stats.
 
     Args:
@@ -59,9 +57,7 @@ def load_dataset(
     next_obs = jnp.asarray(np.concatenate(all_next_obs), dtype=jnp.float32)
     dones = jnp.asarray(np.concatenate(all_dones), dtype=jnp.float32)
 
-    dataset = Transition(
-        obs=obs, action=actions, reward=rewards, next_obs=next_obs, done=dones
-    )
+    dataset = Transition(obs=obs, action=actions, reward=rewards, next_obs=next_obs, done=dones)
 
     obs_mean = obs.mean(axis=0)
     obs_std = jnp.nan_to_num(obs.std(axis=0), nan=1.0)

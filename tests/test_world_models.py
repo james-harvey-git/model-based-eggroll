@@ -22,18 +22,20 @@ NUM_ENSEMBLE = 3
 NUM_ELITES = 2
 N = 200  # transitions
 
-FAST_CFG = OmegaConf.create({
-    "num_ensemble": NUM_ENSEMBLE,
-    "num_elites": NUM_ELITES,
-    "n_layers": 2,
-    "layer_size": 32,
-    "num_epochs": 5,
-    "lr": 1e-3,
-    "batch_size": 32,
-    "weight_decay": 2.5e-5,
-    "logvar_diff_coef": 0.01,
-    "validation_split": 0.2,
-})
+FAST_CFG = OmegaConf.create(
+    {
+        "num_ensemble": NUM_ENSEMBLE,
+        "num_elites": NUM_ELITES,
+        "n_layers": 2,
+        "layer_size": 32,
+        "num_epochs": 5,
+        "lr": 1e-3,
+        "batch_size": 32,
+        "weight_decay": 2.5e-5,
+        "logvar_diff_coef": 0.01,
+        "validation_split": 0.2,
+    }
+)
 
 
 @pytest.fixture(scope="module")
@@ -57,8 +59,11 @@ def trained_ensemble(synthetic_dataset):
 class TestEnsembleDynamicsModel:
     def test_forward_pass_shape(self):
         model = EnsembleDynamicsModel(
-            obs_dim=OBS_DIM, action_dim=ACT_DIM, num_ensemble=NUM_ENSEMBLE,
-            n_layers=2, layer_size=32,
+            obs_dim=OBS_DIM,
+            action_dim=ACT_DIM,
+            num_ensemble=NUM_ENSEMBLE,
+            n_layers=2,
+            layer_size=32,
         )
         dummy_input = jnp.zeros(OBS_DIM + ACT_DIM)
         params = model.init(jax.random.key(0), dummy_input)
@@ -68,9 +73,13 @@ class TestEnsembleDynamicsModel:
 
     def test_logvar_clamped(self):
         model = EnsembleDynamicsModel(
-            obs_dim=OBS_DIM, action_dim=ACT_DIM, num_ensemble=NUM_ENSEMBLE,
-            n_layers=2, layer_size=32,
-            max_logvar_init=0.5, min_logvar_init=-10.0,
+            obs_dim=OBS_DIM,
+            action_dim=ACT_DIM,
+            num_ensemble=NUM_ENSEMBLE,
+            n_layers=2,
+            layer_size=32,
+            max_logvar_init=0.5,
+            min_logvar_init=-10.0,
         )
         dummy_input = jnp.zeros(OBS_DIM + ACT_DIM)
         params = model.init(jax.random.key(0), dummy_input)

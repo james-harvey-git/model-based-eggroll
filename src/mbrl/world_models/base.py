@@ -19,7 +19,7 @@ class EnsembleDynamics(ABC):
     @abstractmethod
     def step(
         self,
-        obs: jnp.ndarray,     # (obs_dim,)
+        obs: jnp.ndarray,  # (obs_dim,)
         action: jnp.ndarray,  # (act_dim,)
         rng: jax.Array,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:

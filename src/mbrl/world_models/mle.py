@@ -6,21 +6,21 @@ https://github.com/EmptyJackson/unifloral (algorithms/dynamics.py)
 
 from typing import cast
 
+import flax.linen as nn
 import jax
 import jax.numpy as jnp
-import flax.linen as nn
-from flax.training.train_state import TrainState
 import optax
+from flax.training.train_state import TrainState
 from omegaconf import DictConfig
 
 from mbrl.data import Transition, create_epoch_iterator, train_val_split
 from mbrl.world_models.base import EnsembleDynamics
 from mbrl.world_models.termination_fns import get_termination_fn
 
-
 # ---------------------------------------------------------------------------
 # Flax network (ported verbatim from Unifloral)
 # ---------------------------------------------------------------------------
+
 
 class SingleDynamicsModel(nn.Module):
     obs_dim: int
@@ -83,6 +83,7 @@ class EnsembleDynamicsModel(nn.Module):
 # Training utilities (ported from Unifloral)
 # ---------------------------------------------------------------------------
 
+
 def _train_dynamics(train_state, cfg, train_inputs, train_targets, val_inputs, val_targets, rng):
     """Train the ensemble and return (train_state, elite_idxs).
 
@@ -136,15 +137,14 @@ def _train_dynamics(train_state, cfg, train_inputs, train_targets, val_inputs, v
 
     dummy_elite_idxs = jnp.zeros((num_elites,), jnp.int32)
     init_carry = (rng, train_state, dummy_elite_idxs)
-    _, train_state, elite_idxs = jax.lax.fori_loop(
-        0, cfg.num_epochs, train_epoch, init_carry
-    )
+    _, train_state, elite_idxs = jax.lax.fori_loop(0, cfg.num_epochs, train_epoch, init_carry)
     return train_state, elite_idxs
 
 
 # ---------------------------------------------------------------------------
 # MLEEnsemble
 # ---------------------------------------------------------------------------
+
 
 class MLEEnsemble(EnsembleDynamics):
     """Ensemble of dynamics models trained by maximum likelihood estimation.
@@ -163,7 +163,7 @@ class MLEEnsemble(EnsembleDynamics):
             layer_size=cfg.layer_size,
         )
         self.termination_fn = get_termination_fn(dataset_id)
-        self.params = None      # populated by train()
+        self.params = None  # populated by train()
         self.num_elites = None  # populated by train()
 
     def train(self, dataset: Transition, cfg: DictConfig, rng: jax.Array) -> None:

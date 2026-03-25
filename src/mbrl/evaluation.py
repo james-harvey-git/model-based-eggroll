@@ -83,9 +83,7 @@ def get_reference_scores(dataset_id: str) -> tuple[float, float]:
 
     # Expert score: mean episode return from the expert dataset
     expert_ds = minari.load_dataset(f"{env_prefix}/expert-v0", download=True)
-    expert_returns = [
-        float(ep.rewards.sum()) for ep in expert_ds.iterate_episodes()
-    ]
+    expert_returns = [float(ep.rewards.sum()) for ep in expert_ds.iterate_episodes()]
     expert_ref = mean(expert_returns)
 
     # Random score: roll out a random policy in the environment

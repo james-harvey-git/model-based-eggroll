@@ -29,8 +29,10 @@ class Logger:
 
     def log_eval(self, dataset_id: str, raw_score: float, normalized_score: float) -> None:
         """Log final evaluation results."""
-        wandb.log({
-            "eval/raw_score": raw_score,
-            "eval/normalized_score": normalized_score,
-            "eval/dataset_id": dataset_id,
-        })
+        wandb.log(
+            {
+                "eval/raw_score": raw_score,
+                "eval/normalized_score": normalized_score,
+                "eval/dataset_id": dataset_id,
+            }
+        )
