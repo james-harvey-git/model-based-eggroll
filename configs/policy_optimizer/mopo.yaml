@@ -1,4 +1,4 @@
-_target_: mbrl.algorithms.mopo.train
+_target_: mbrl.policy_optimizers.mopo.train
 
 penalty_coeff: 1.0
 rollout_length: 5

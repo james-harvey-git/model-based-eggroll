@@ -26,8 +26,8 @@ def _world_model_type(cfg: DictConfig) -> str:
 
 def _algorithm_type(cfg: DictConfig) -> str:
     """Extract a short algorithm identifier from _target_, e.g. 'mopo'."""
-    target: str = cfg.algorithm.get("_target_", "unknown")
-    # target is like "mbrl.algorithms.mopo.train" — take the module name
+    target: str = cfg.policy_optimizer.get("_target_", "unknown")
+    # target is like "mbrl.policy_optimizers.mopo.train" — take the module name
     parts = target.split(".")
     return parts[-2] if len(parts) >= 2 else parts[-1]
 

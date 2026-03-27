@@ -2,4 +2,4 @@
 defaults:
   - override /dataset: halfcheetah_medium
   - override /world_model: mle
-  - override /algorithm: mopo
+  - override /policy_optimizer: mopo

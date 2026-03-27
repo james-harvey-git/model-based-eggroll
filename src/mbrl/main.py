@@ -7,8 +7,8 @@ Run a specific stage or the full pipeline via cfg.stage:
     uv run python src/mbrl/main.py stage=all  (default)
 
 Combine with config group overrides:
-    uv run python src/mbrl/main.py world_model=mle algorithm=mopo
-    uv run python src/mbrl/main.py world_model=eggroll_ensemble algorithm=eggroll
+    uv run python src/mbrl/main.py world_model=mle policy_optimizer=mopo
+    uv run python src/mbrl/main.py world_model=eggroll_ensemble policy_optimizer=eggroll
 """
 
 import hydra

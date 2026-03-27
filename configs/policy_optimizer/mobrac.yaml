@@ -1,0 +1,3 @@
+_target_: mbrl.policy_optimizers.mobrac.train
+
+num_policy_updates: 1000

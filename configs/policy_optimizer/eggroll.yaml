@@ -1,4 +1,4 @@
-_target_: mbrl.algorithms.eggroll.train
+_target_: mbrl.policy_optimizers.eggroll.train
 
 eggroll:
   population_size: 256
