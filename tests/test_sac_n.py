@@ -52,7 +52,7 @@ class TestNetworkShapes:
         action = jnp.zeros(ACT_DIM)
         params = net.init(jax.random.key(0), obs, action)
         out = net.apply(params, obs, action)
-        assert out.shape == ()
+        assert out.shape == () # type: ignore
 
     def test_vector_q_output_shape(self):
         net = VectorQ(num_critics=NUM_CRITICS)
@@ -60,14 +60,14 @@ class TestNetworkShapes:
         action = jnp.zeros(ACT_DIM)
         params = net.init(jax.random.key(0), obs, action)
         out = net.apply(params, obs, action)
-        assert out.shape == (NUM_CRITICS,)
+        assert out.shape == (NUM_CRITICS,) # type: ignore
 
     def test_actor_distribution_shape(self):
         net = TanhGaussianActor(ACT_DIM)
         obs = jnp.zeros(OBS_DIM)
         params = net.init(jax.random.key(0), obs)
         pi = net.apply(params, obs)
-        sample, log_prob = pi.sample_and_log_prob(seed=jax.random.key(1))
+        sample, log_prob = pi.sample_and_log_prob(seed=jax.random.key(1)) # type: ignore
         assert sample.shape == (ACT_DIM,)
         assert log_prob.shape == (ACT_DIM,)
 
@@ -75,7 +75,7 @@ class TestNetworkShapes:
         net = EntropyCoef()
         params = net.init(jax.random.key(0))
         log_coef = net.apply(params)
-        assert jnp.allclose(jnp.exp(log_coef), jnp.ones(()), atol=1e-6)
+        assert jnp.allclose(jnp.exp(log_coef), jnp.ones(()), atol=1e-6) # type: ignore
 
 
 class TestAgentState:
