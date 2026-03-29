@@ -14,6 +14,7 @@ dependencies = [
     "wandb>=0.25.1",
     "optax>=0.2.8",
     "flax>=0.12.6",
+    "distrax>=0.1.7",
 ]
 
 [dependency-groups]
