@@ -92,7 +92,7 @@ class EntropyCoef(nn.Module):
     def __call__(self) -> jax.Array:
         log_ent_coef = self.param(
             "log_ent_coef",
-            init_fn=lambda key: jnp.full((), jnp.log(self.ent_coef_init)),
+            init_fn=lambda _key: jnp.full((), jnp.log(self.ent_coef_init)),
         )
         return log_ent_coef
 

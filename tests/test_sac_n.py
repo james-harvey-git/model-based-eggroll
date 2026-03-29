@@ -104,7 +104,7 @@ class TestSacUpdate:
             FAST_CFG,
         )
         rng = jax.random.key(42)
-        (rng_out, new_state), metrics = sac_update(rng, agent_state, synthetic_batch)
+        (_rng, new_state), metrics = sac_update(rng, agent_state, synthetic_batch)
 
         # Metrics structure
         assert set(metrics.keys()) == {
@@ -139,3 +139,41 @@ class TestSacUpdate:
             new_state.vec_q.params,
         )
         assert any(jax.tree.leaves(target_differs_from_online))
+
+    def test_terminal_state_masking(self, agent_state, synthetic_batch):
+        """done=1 should zero the bootstrap term so next_obs has no effect on critic loss.
+
+        For terminal transitions: target = reward + gamma * (1 - 1) * next_v = reward.
+        Changing next_obs should leave the critic loss unchanged.
+        For non-terminal transitions: target depends on next_obs, so different next_obs
+        should produce a different critic loss.
+        """
+        sac_update = make_sac_update(
+            agent_state.actor.apply_fn,
+            agent_state.vec_q.apply_fn,
+            agent_state.alpha.apply_fn,
+            FAST_CFG,
+        )
+        rng = jax.random.key(7)
+        next_obs_a = synthetic_batch.next_obs
+        next_obs_b = next_obs_a * 100.0  # very different next observations
+
+        # --- Terminal batch (done=1): next_obs should not matter ---
+        done_terminal = jnp.ones(BATCH_SIZE, dtype=jnp.float32)
+        batch_t1 = synthetic_batch._replace(done=done_terminal, next_obs=next_obs_a)
+        batch_t2 = synthetic_batch._replace(done=done_terminal, next_obs=next_obs_b)
+        _, metrics_t1 = sac_update(rng, agent_state, batch_t1)
+        _, metrics_t2 = sac_update(rng, agent_state, batch_t2)
+        assert jnp.allclose(metrics_t1["critic_loss"], metrics_t2["critic_loss"]), (
+            "critic_loss should be identical for terminal transitions regardless of next_obs"
+        )
+
+        # --- Non-terminal batch (done=0): next_obs should matter ---
+        done_nonterminal = jnp.zeros(BATCH_SIZE, dtype=jnp.float32)
+        batch_n1 = synthetic_batch._replace(done=done_nonterminal, next_obs=next_obs_a)
+        batch_n2 = synthetic_batch._replace(done=done_nonterminal, next_obs=next_obs_b)
+        _, metrics_n1 = sac_update(rng, agent_state, batch_n1)
+        _, metrics_n2 = sac_update(rng, agent_state, batch_n2)
+        assert not jnp.allclose(metrics_n1["critic_loss"], metrics_n2["critic_loss"]), (
+            "critic_loss should differ for non-terminal transitions when next_obs changes"
+        )
