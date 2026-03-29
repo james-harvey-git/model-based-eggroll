@@ -173,9 +173,27 @@ class MLEEnsemble(EnsembleDynamics):
             n_layers=cfg.n_layers,
             layer_size=cfg.layer_size,
         )
-        self.termination_fn = get_termination_fn(dataset_id)
+        self._termination_fn = get_termination_fn(dataset_id)
         self.params = None  # populated by train()
         self.num_elites = None  # populated by train()
+
+    @property
+    def termination_fn(self) -> Callable:
+        return self._termination_fn
+
+    def predict_ensemble(
+        self,
+        obs: jnp.ndarray,
+        action: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Return (ensemble_mean, ensemble_std) for all elite members."""
+        assert self.params is not None, "Model must be trained before calling predict_ensemble()"
+        obs_action = jnp.concatenate([obs, action], axis=-1)
+        ensemble_mean, ensemble_logvar = cast(
+            tuple[jax.Array, jax.Array], self.model.apply(self.params, obs_action)
+        )
+        ensemble_std = jnp.exp(0.5 * ensemble_logvar)
+        return ensemble_mean, ensemble_std
 
     def train(
         self,
