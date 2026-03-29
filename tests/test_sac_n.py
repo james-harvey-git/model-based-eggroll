@@ -124,6 +124,14 @@ class TestSacUpdate:
         )
         assert any(jax.tree.leaves(actor_leaves_changed))
 
+        # Critic params changed after gradient step
+        critic_leaves_changed = jax.tree.map(
+            lambda a, b: ~jnp.array_equal(a, b),
+            agent_state.vec_q.params,
+            new_state.vec_q.params,
+        )
+        assert any(jax.tree.leaves(critic_leaves_changed))
+
         # Target Q params differ from online Q after Polyak update
         target_differs_from_online = jax.tree.map(
             lambda t, q: ~jnp.array_equal(t, q),
