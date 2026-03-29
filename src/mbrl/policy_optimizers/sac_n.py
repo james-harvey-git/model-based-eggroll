@@ -165,7 +165,10 @@ def make_sac_update(
     q_apply_fn: Callable,
     alpha_apply_fn: Callable,
     cfg: DictConfig,
-) -> Callable:
+) -> Callable[
+    [jax.Array, AgentTrainState, Transition],
+    tuple[tuple[jax.Array, AgentTrainState], dict[str, jax.Array]],
+]:
     """Return a pure SAC-N update function.
 
     The returned function accepts a pre-built batch so that callers (MOPO,
