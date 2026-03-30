@@ -26,7 +26,8 @@
 #   uv run wandb login
 #
 #   # 4. Download Minari datasets (requires internet — do on login node)
-#   uv run python -c "import minari; minari.load_dataset('mujoco/halfcheetah/medium-v0', download=True)"
+#   #    Set MINARI_DATASETS_PATH so datasets land in the same cache the job uses.
+#   MINARI_DATASETS_PATH=$HOME/minari_cache uv run python -c "import minari; minari.load_dataset('mujoco/halfcheetah/medium-v0', download=True)"
 #
 #   # 5. Create the log directory (SLURM needs this before the job starts)
 #   mkdir -p logs/slurm
