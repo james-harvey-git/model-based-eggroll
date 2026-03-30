@@ -105,7 +105,7 @@ def make_rollout_fn(
         def _rollout_step(
             carry: tuple[jax.Array, jax.Array], _: None
         ) -> tuple[tuple[jax.Array, jax.Array], Transition]:
-            """One time step of the rollout. Vmapped by caller over the batch dimension."""
+            """One time step of the rollout. Vmapped over the batch at the scan call site."""
             obs, rng = carry
             rng, rng_step = jax.random.split(rng)
             transition = _sample_transition(rng_step, obs)
@@ -136,7 +136,7 @@ def make_rollout_fn(
         # Oldest data is at the front of the buffer, newest at the back.
         # num_new is a Python int — required for static slice bounds inside JIT.
         return jax.tree.map(
-            lambda old, new: jnp.concatenate([old[:-num_new], new[:num_new]]),
+            lambda old, new: jnp.concatenate([old[:-num_new], new]),
             rollout_buffer,
             rollouts,
         )
@@ -178,7 +178,7 @@ def make_mopo_step(
         # Conditionally refresh rollout buffer every rollout_interval SAC steps.
         # actor.step == 0 on the first call → immediate rollout (buffer starts zero-filled).
         # Zero-padded transitions drawn before the first refresh have reward=0, done=0,
-        # producing zero TD error in the SAC-N critic update — handled gracefully.
+        # producing critic targets based on Q(0, π(0)) — a negligible warm-up effect.
         rng, rng_rollout = jax.random.split(rng)
         rollout_buffer = jax.lax.cond(
             agent_state.actor.step % rollout_interval == 0,
