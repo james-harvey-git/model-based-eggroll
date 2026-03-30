@@ -20,7 +20,7 @@
 #
 #   # 2. Install dependencies on a compute node (not the login node)
 #   cd $HOME/model-based-eggroll
-#   uv sync
+#   uv sync --group cuda
 #
 #   # 3. Log in to WandB
 #   uv run wandb login
