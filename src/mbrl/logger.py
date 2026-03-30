@@ -86,7 +86,9 @@ class Logger:
 
     def log_policy_step(self, step: int, **metrics: float) -> None:
         """Log policy training metrics (return, entropy, critic loss, etc.)."""
-        raise NotImplementedError
+        if not self.enabled:
+            return
+        wandb.log({f"policy/{k}": v for k, v in metrics.items()}, step=step)
 
     def log_eval(self, dataset_id: str, raw_score: float, normalized_score: float) -> None:
         """Log final evaluation results."""

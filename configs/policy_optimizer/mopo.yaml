@@ -15,3 +15,4 @@ rollout_interval: 1000
 rollout_batch_size: 50000
 model_retain_epochs: 5
 dataset_sample_ratio: 0.05
+eval_interval: 5000

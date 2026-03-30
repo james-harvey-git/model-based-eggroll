@@ -103,3 +103,60 @@ def compute_normalized_score(dataset_id: str, raw_score: float) -> float:
     """Normalise *raw_score* to [0, 100] using random/expert reference returns."""
     random_ref, expert_ref = get_reference_scores(dataset_id)
     return (raw_score - random_ref) / (expert_ref - random_ref) * 100.0
+
+
+# ---------------------------------------------------------------------------
+# Vectorized evaluation (batched policy, gymnasium.make_vec)
+# ---------------------------------------------------------------------------
+
+_env_id_cache: dict[str, str] = {}
+
+
+def get_env_id(dataset_id: str) -> str:
+    """Derive the Gymnasium environment ID from a Minari dataset ID."""
+    if dataset_id in _env_id_cache:
+        return _env_id_cache[dataset_id]
+    ds = minari.load_dataset(dataset_id)
+    env = ds.recover_environment()
+    env_id = env.spec.id  # type: ignore[union-attr]
+    env.close()
+    _env_id_cache[dataset_id] = env_id
+    return env_id
+
+
+def evaluate_policy_vectorized(
+    batched_policy: Callable[[np.ndarray], np.ndarray],
+    env_id: str,
+    num_episodes: int,
+    seed: int,
+    num_envs: int = 8,
+) -> list[float]:
+    """Evaluate a batched policy using vectorised environments.
+
+    Args:
+        batched_policy: Maps ``(num_envs, obs_dim)`` obs → ``(num_envs, act_dim)`` actions.
+        env_id: Gymnasium environment ID (use :func:`get_env_id` to derive from dataset ID).
+        num_episodes: Number of complete episodes to collect.
+        seed: Base seed passed to ``envs.reset()``.
+        num_envs: Number of parallel environments.
+
+    Returns:
+        List of per-episode undiscounted returns (length == num_episodes).
+    """
+    envs = gymnasium.make_vec(env_id, num_envs=num_envs, vectorization_mode="sync")
+    obs, _ = envs.reset(seed=seed)
+    ep_returns = np.zeros(num_envs)
+    returns: list[float] = []
+    try:
+        while len(returns) < num_episodes:
+            actions = np.asarray(batched_policy(obs))
+            obs, rewards, terminated, truncated, _ = envs.step(actions)
+            ep_returns += rewards
+            dones = terminated | truncated
+            for i in range(num_envs):
+                if dones[i]:
+                    returns.append(float(ep_returns[i]))
+                    ep_returns[i] = 0.0
+    finally:
+        envs.close()
+    return returns[:num_episodes]

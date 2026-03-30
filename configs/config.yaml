@@ -17,3 +17,4 @@ wandb:
 
 eval:
   num_episodes: 10
+  eval_workers: 8

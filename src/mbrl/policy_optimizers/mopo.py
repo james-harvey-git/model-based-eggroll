@@ -205,13 +205,15 @@ def make_mopo_step(
     return mopo_step
 
 
-def train(
+def make_train_step(
     world_model: EnsembleDynamics,
     dataset: Transition,
     cfg: DictConfig,
     rng: jax.Array,
-) -> AgentTrainState:
-    """Train a policy with MOPO using the provided world model.
+) -> tuple[Callable, tuple[jax.Array, AgentTrainState, Transition]]:
+    """Build the MOPO step function and initial runner state.
+
+    Convention function: every policy optimizer module exports this.
 
     Args:
         world_model: Pre-trained ensemble dynamics model.
@@ -220,7 +222,7 @@ def train(
         rng: JAX random key.
 
     Returns:
-        Trained AgentTrainState (actor, vec_q, vec_q_target, alpha).
+        ``(mopo_step, runner_state)`` where ``runner_state = (rng, agent_state, rollout_buffer)``.
     """
     obs_dim = dataset.obs.shape[1]
     act_dim = dataset.action.shape[1]
@@ -251,12 +253,40 @@ def train(
     rollout_fn = make_rollout_fn(world_model, agent_state.actor.apply_fn, dataset.obs, cfg)
     mopo_step = make_mopo_step(sac_update, rollout_fn, dataset, cfg)
 
-    # Run the full training loop as a single compiled scan.
-    # Chunked training with interleaved evaluation is the experiment runner's responsibility
-    # (Step 12 / experiments/policy.py).
-    num_policy_updates = int(cfg.num_policy_updates)
     runner_state = (rng, agent_state, rollout_buffer)
-    runner_state, _ = jax.lax.scan(mopo_step, runner_state, None, length=num_policy_updates)
+    return mopo_step, runner_state
 
+
+def extract_actor(
+    runner_state: tuple[jax.Array, AgentTrainState, Transition],
+) -> tuple[dict, int]:
+    """Return ``(actor_params, step)`` from the MOPO runner state.
+
+    Convention function: every policy optimizer module exports this.
+    """
+    _, agent_state, _ = runner_state
+    return dict(agent_state.actor.params), int(agent_state.actor.step)
+
+
+def train(
+    world_model: EnsembleDynamics,
+    dataset: Transition,
+    cfg: DictConfig,
+    rng: jax.Array,
+) -> AgentTrainState:
+    """Train a policy with MOPO using the provided world model.
+
+    Args:
+        world_model: Pre-trained ensemble dynamics model.
+        dataset: Offline dataset of real transitions.
+        cfg: Policy optimizer config (see configs/policy_optimizer/mopo.yaml).
+        rng: JAX random key.
+
+    Returns:
+        Trained AgentTrainState (actor, vec_q, vec_q_target, alpha).
+    """
+    mopo_step, runner_state = make_train_step(world_model, dataset, cfg, rng)
+    num_policy_updates = int(cfg.num_policy_updates)
+    runner_state, _ = jax.lax.scan(mopo_step, runner_state, None, length=num_policy_updates)
     _, agent_state, _ = runner_state
     return agent_state
