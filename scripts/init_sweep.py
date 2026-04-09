@@ -16,7 +16,7 @@ def main() -> None:
     config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/sweep/mopo_halfcheetah.yaml"
     with open(config_path) as f:
         sweep_config = yaml.safe_load(f)
-    sweep_id = wandb.sweep(sweep_config, project="model-based-eggroll")
+    sweep_id = wandb.sweep(sweep_config, entity="model-based-eggroll", project="model-based-eggroll")
     print(f"Sweep ID: {sweep_id}")
     print(f"View at: https://wandb.ai/model-based-eggroll/model-based-eggroll/sweeps/{sweep_id}")
 

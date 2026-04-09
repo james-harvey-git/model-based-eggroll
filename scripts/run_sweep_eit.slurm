@@ -81,7 +81,7 @@ echo "============================================"
 # The sweep queue ensures no two agents pick the same config.
 # 'wait' holds until all background processes finish.
 for i in $(seq 1 "${RUNS_PER_GPU}"); do
-    uv run wandb agent --count 1 "model-based-eggroll/${SWEEP_ID}" &
+    uv run wandb agent --count 1 "model-based-eggroll/model-based-eggroll/${SWEEP_ID}" &
 done
 
 wait
