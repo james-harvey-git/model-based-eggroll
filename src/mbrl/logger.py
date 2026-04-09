@@ -73,6 +73,17 @@ class Logger:
                 config=cast(dict[str, Any], OmegaConf.to_container(cfg, resolve=True)),
             )
 
+    @classmethod
+    def from_existing_run(cls, _cfg: DictConfig) -> "Logger":
+        """Create a Logger that attaches to an already-initialised W&B run.
+
+        Used by sweep scripts where wandb.init() is called before Logger creation.
+        Skips __init__ to avoid a second wandb.init() call.
+        """
+        instance = cls.__new__(cls)
+        instance.enabled = True
+        return instance
+
     def finish(self) -> None:
         if not self.enabled:
             return
