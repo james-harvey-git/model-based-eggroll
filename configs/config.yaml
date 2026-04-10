@@ -7,6 +7,7 @@ defaults:
 
 seed: 0
 stage: all
+debug: true
 checkpoint_dir: checkpoints
 
 wandb:
