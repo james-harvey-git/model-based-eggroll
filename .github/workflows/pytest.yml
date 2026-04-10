@@ -1,11 +1,11 @@
-name: Ruff
+name: Pytest
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
 jobs:
-  ruff:
+  pytest:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,5 +21,5 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Ruff
-        run: uv run ruff check
+      - name: Pytest
+        run: uv run pytest tests

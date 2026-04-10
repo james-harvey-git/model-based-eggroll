@@ -18,10 +18,10 @@ import os
 from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
+import wandb
 
 from mbrl import experiments
 from mbrl.logger import Logger
-import wandb
 
 
 def compose_config(overrides: dict | None = None) -> DictConfig:
