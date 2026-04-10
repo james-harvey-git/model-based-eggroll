@@ -9,6 +9,7 @@ seed: 0
 stage: all
 debug: true
 checkpoint_dir: checkpoints
+policy_checkpoint_dir: null  # set at runtime: {checkpoint_dir}/policies/{algo}-s{seed}-{timestamp}
 
 wandb:
   enabled: false

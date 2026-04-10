@@ -20,7 +20,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from mbrl import experiments
-from mbrl.logger import Logger, make_wm_group
+from mbrl.logger import Logger, _algorithm_type, make_wm_group
 
 
 def _update_latest_symlink(base_dir: Path, wm_group: str) -> None:
@@ -60,6 +60,12 @@ def main(cfg: DictConfig) -> None:
             experiments.world_model.run(cfg, logger)
             _update_latest_symlink(base_checkpoint_dir, wm_group)
         if stage in ("policy", "all"):
+            policy_dir = (
+                Path(cfg.checkpoint_dir)
+                / "policies"
+                / f"{_algorithm_type(cfg)}-s{cfg.seed}-{timestamp}"
+            )
+            OmegaConf.update(cfg, "policy_checkpoint_dir", str(policy_dir))
             experiments.policy.run(cfg, logger)
         if stage in ("eval", "all"):
             experiments.evaluate.run(cfg, logger)

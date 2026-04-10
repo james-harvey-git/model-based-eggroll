@@ -85,6 +85,7 @@ def sweep_run() -> None:
         if not link.exists():
             link.symlink_to(Path(wm_path).resolve())
 
+    OmegaConf.update(cfg, "policy_checkpoint_dir", str(cfg.checkpoint_dir))
     logger = Logger.from_existing_run(cfg)
     try:
         experiments.policy.run(cfg, logger)
