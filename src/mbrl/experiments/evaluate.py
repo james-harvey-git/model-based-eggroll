@@ -15,7 +15,7 @@ from mbrl.policy_optimizers.sac_n import TanhGaussianActor
 
 def run(cfg: DictConfig, logger: Logger) -> None:
     """Load a policy checkpoint, evaluate stochastically in the real environment, and log."""
-    checkpoint_path = Path(cfg.checkpoint_dir) / "policy.pkl"
+    checkpoint_path = Path(cfg.policy_checkpoint_dir) / "policy.pkl"
     with open(checkpoint_path, "rb") as f:
         ckpt = pickle.load(f)
 

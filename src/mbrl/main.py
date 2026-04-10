@@ -68,6 +68,13 @@ def main(cfg: DictConfig) -> None:
             OmegaConf.update(cfg, "policy_checkpoint_dir", str(policy_dir))
             experiments.policy.run(cfg, logger)
         if stage in ("eval", "all"):
+            if cfg.get("policy_checkpoint_dir") is None:
+                # Auto-resolve: pick the most recently modified policy run subdir.
+                policies_dir = Path(cfg.checkpoint_dir) / "policies"
+                runs = sorted(policies_dir.iterdir(), key=lambda p: p.stat().st_mtime)
+                if not runs:
+                    raise FileNotFoundError(f"No policy checkpoints found under {policies_dir}")
+                OmegaConf.update(cfg, "policy_checkpoint_dir", str(runs[-1]))
             experiments.evaluate.run(cfg, logger)
     except Exception:
         logger.set_crashed_tag()
