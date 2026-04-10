@@ -23,6 +23,9 @@ dev = [
     "pytest>=9.0.2",
     "ruff>=0.15.7",
 ]
+cuda = [
+    "jax[cuda12]>=0.9.1",
+]
 
 [tool.uv]
 package = true
@@ -37,9 +40,12 @@ packages = ["src/mbrl"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+exclude = ["*.ipynb"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I"]
 
 [tool.ruff.lint.isort]
 force-sort-within-sections = true
+known-first-party = ["mbrl"]
+known-third-party = ["wandb"]

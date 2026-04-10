@@ -5,13 +5,14 @@ https://github.com/EmptyJackson/unifloral (algorithms/dynamics.py)
 """
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import cast
 
 import flax.linen as nn
 from flax.training.train_state import TrainState
 import jax
 import jax.numpy as jnp
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 import optax
 
 from mbrl.data import Transition, create_epoch_iterator, train_val_split
@@ -176,6 +177,23 @@ class MLEEnsemble(EnsembleDynamics):
         self._termination_fn = get_termination_fn(dataset_id)
         self.params = None  # populated by train()
         self.num_elites = None  # populated by train()
+
+    @classmethod
+    def load_from_checkpoint(cls, path: str | Path) -> "MLEEnsemble":
+        """Reconstruct a trained MLEEnsemble from a checkpoint file."""
+        import pickle
+
+        with open(path, "rb") as f:
+            ckpt = pickle.load(f)
+        wm_cfg = OmegaConf.create(ckpt["world_model_cfg"])
+        # Override num_ensemble to match elite-pruned checkpoint params
+        wm_cfg_override = OmegaConf.create(
+            {**OmegaConf.to_container(wm_cfg), "num_ensemble": ckpt["num_elites"]}  # type: ignore[arg-type]
+        )
+        instance = cls(ckpt["obs_dim"], ckpt["act_dim"], ckpt["dataset_id"], wm_cfg_override)
+        instance.params = ckpt["params"]
+        instance.num_elites = ckpt["num_elites"]
+        return instance
 
     @property
     def termination_fn(self) -> Callable:

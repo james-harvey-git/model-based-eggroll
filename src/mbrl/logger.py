@@ -1,5 +1,7 @@
 """W&B logger. Domain-specific log methods are stubbed until training loops exist."""
 
+from datetime import datetime
+import os
 from typing import Any, cast  # noqa: I001
 
 from omegaconf import DictConfig, OmegaConf
@@ -41,13 +43,44 @@ def _dataset_short(cfg: DictConfig) -> str:
     return f"{env}-{split}" if split else env
 
 
-def _auto_group(cfg: DictConfig) -> str:
-    return f"{_world_model_type(cfg)}-{_algorithm_type(cfg)}-{_dataset_short(cfg)}"
+def make_wm_group(cfg: DictConfig, timestamp: str) -> str:
+    """Generate the world-model group name: used as W&B group and checkpoint subdir.
+
+    Format: {wm}-{dataset}-s{seed}-{YYYYMMDD-HHMMSS}
+    """
+    return f"{_world_model_type(cfg)}-{_dataset_short(cfg)}-s{cfg.seed}-{timestamp}"
 
 
-def _auto_name(cfg: DictConfig) -> str:
-    stage_suffix = _STAGE_SUFFIX.get(cfg.get("stage", "all"), "")
-    return f"{_auto_group(cfg)}{stage_suffix}-s{cfg.seed}"
+def _auto_name(cfg: DictConfig, timestamp: str) -> str:
+    stage = cfg.get("stage", "all")
+    stage_suffix = _STAGE_SUFFIX.get(stage, "")
+    wm = _world_model_type(cfg)
+    dataset = _dataset_short(cfg)
+    seed = cfg.seed
+    if stage == "world_model":
+        return f"{wm}-{dataset}-s{seed}-{timestamp}{stage_suffix}"
+    algo = _algorithm_type(cfg)
+    return f"{wm}-{algo}-{dataset}-s{seed}-{timestamp}{stage_suffix}"
+
+
+def auto_tags(cfg: DictConfig) -> list[str]:
+    """Build the full tag list: sorted auto tags first, then manual tags in config order."""
+    stage = cfg.get("stage", "all")
+
+    auto: set[str] = set()
+    auto.add(_world_model_type(cfg))
+    auto.add(_dataset_short(cfg))
+    if stage != "world_model":
+        auto.add(_algorithm_type(cfg))
+    if os.environ.get("WANDB_SWEEP_ID"):
+        auto.add("sweep")
+    if os.environ.get("SLURM_JOB_ID"):
+        auto.add("cluster")
+    if cfg.get("debug", False):
+        auto.add("debug")
+
+    manual = [t.lower() for t in cfg.get("wandb", {}).get("tags", [])]
+    return sorted(auto) + [t for t in manual if t not in auto]
 
 
 # ---------------------------------------------------------------------------
@@ -58,25 +91,52 @@ def _auto_name(cfg: DictConfig) -> str:
 class Logger:
     """Thin wrapper around W&B. Passed into each experiment stage."""
 
-    def __init__(self, cfg: DictConfig) -> None:
+    def __init__(
+        self,
+        cfg: DictConfig,
+        wm_group: str | None = None,
+        timestamp: str | None = None,
+    ) -> None:
+        ts = timestamp or datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.wm_group: str = wm_group or make_wm_group(cfg, ts)
+
         wandb_cfg = cfg.get("wandb", {})
         self.enabled: bool = wandb_cfg.get("enabled", False)  # type: ignore[union-attr]
         if self.enabled:
-            group = wandb_cfg.get("group", None) or _auto_group(cfg)  # type: ignore[union-attr]
-            name = wandb_cfg.get("name", None) or _auto_name(cfg)  # type: ignore[union-attr]
+            name = wandb_cfg.get("name", None) or _auto_name(cfg, ts)  # type: ignore[union-attr]
             wandb.init(
                 project="model-based-eggroll",
                 entity=wandb_cfg.get("entity", "model-based-eggroll"),  # type: ignore[union-attr]
-                group=group,
+                group=self.wm_group,
                 job_type=cfg.get("stage", "all"),
                 name=name,
+                tags=auto_tags(cfg),
                 config=cast(dict[str, Any], OmegaConf.to_container(cfg, resolve=True)),
             )
+
+    @classmethod
+    def from_existing_run(cls, _cfg: DictConfig, wm_group: str | None = None) -> "Logger":
+        """Create a Logger that attaches to an already-initialised W&B run.
+
+        Used by sweep scripts where wandb.init() is called before Logger creation.
+        """
+        instance = cls.__new__(cls)
+        instance.enabled = True
+        instance.wm_group = wm_group or ""
+        return instance
 
     def finish(self) -> None:
         if not self.enabled:
             return
         wandb.finish()
+
+    def set_crashed_tag(self) -> None:
+        """Add 'crashed' tag to the current W&B run. No-op when disabled. Idempotent."""
+        if not self.enabled or wandb.run is None:
+            return
+        tags = tuple(wandb.run.tags or ())
+        if "crashed" not in tags:
+            wandb.run.tags = (*tags, "crashed")
 
     def log_world_model_step(self, epoch: int, **metrics: float) -> None:
         """Log per-epoch world model training metrics (train_loss, val_mse, etc.)."""
@@ -86,7 +146,9 @@ class Logger:
 
     def log_policy_step(self, step: int, **metrics: float) -> None:
         """Log policy training metrics (return, entropy, critic loss, etc.)."""
-        raise NotImplementedError
+        if not self.enabled:
+            return
+        wandb.log({f"policy/{k}": v for k, v in metrics.items()}, step=step)
 
     def log_eval(self, dataset_id: str, raw_score: float, normalized_score: float) -> None:
         """Log final evaluation results."""

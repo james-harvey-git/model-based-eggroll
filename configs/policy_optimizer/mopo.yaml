@@ -8,10 +8,11 @@ polyak_step_size: 0.005
 num_critics: 10
 
 # MOPO-specific
-penalty_coeff: 1.0
+penalty_coeff: 0.5
 rollout_length: 5
 num_policy_updates: 3_000_000
 rollout_interval: 1000
 rollout_batch_size: 50000
 model_retain_epochs: 5
 dataset_sample_ratio: 0.05
+eval_interval: 5000

@@ -7,7 +7,13 @@ from omegaconf import OmegaConf
 import pytest
 
 from mbrl.data import Transition
-from mbrl.policy_optimizers.mopo import make_mopo_step, make_rollout_fn, train
+from mbrl.policy_optimizers.mopo import (
+    extract_actor,
+    make_mopo_step,
+    make_rollout_fn,
+    make_train_step,
+    train,
+)
 from mbrl.policy_optimizers.sac_n import AgentTrainState, create_agent_state, make_sac_update
 from mbrl.world_models.mle import MLEEnsemble
 
@@ -41,6 +47,7 @@ FAST_CFG = OmegaConf.create({
     "rollout_batch_size": 16,
     "model_retain_epochs": 2,
     "dataset_sample_ratio": 0.25,
+    "eval_interval": 2,
 })
 
 # Max buffer size derived from fast config: 16 * 2 * 2 = 64
@@ -228,3 +235,52 @@ class TestMopoTrainE2E:
     def test_actor_step_incremented(self, trained_world_model, synthetic_dataset):
         result = train(trained_world_model, synthetic_dataset, FAST_CFG, jax.random.key(0))
         assert result.actor.step == FAST_CFG.num_policy_updates
+
+
+class TestMakeTrainStep:
+    def test_returns_callable_and_state(self, trained_world_model, synthetic_dataset):
+        step_fn, runner_state = make_train_step(
+            trained_world_model, synthetic_dataset, FAST_CFG, jax.random.key(0)
+        )
+        rng, agent_state, rollout_buffer = runner_state
+        assert callable(step_fn)
+        assert isinstance(agent_state, AgentTrainState)
+        assert rollout_buffer.obs.shape == (MAX_BUFFER_SIZE, OBS_DIM)
+        assert rollout_buffer.action.shape == (MAX_BUFFER_SIZE, ACT_DIM)
+
+    def test_one_step_advances_actor(self, trained_world_model, synthetic_dataset):
+        step_fn, runner_state = make_train_step(
+            trained_world_model, synthetic_dataset, FAST_CFG, jax.random.key(0)
+        )
+        new_runner_state, _ = step_fn(runner_state, None)
+        _, new_agent_state, _ = new_runner_state
+        assert int(new_agent_state.actor.step) == 1
+
+    def test_scan_matches_train(self, trained_world_model, synthetic_dataset):
+        step_fn, runner_state = make_train_step(
+            trained_world_model, synthetic_dataset, FAST_CFG, jax.random.key(0)
+        )
+        num_updates = int(FAST_CFG.num_policy_updates)
+        final_runner_state, _ = jax.lax.scan(
+            step_fn, runner_state, None, length=num_updates
+        )
+        _, agent_state, _ = final_runner_state
+        assert int(agent_state.actor.step) == num_updates
+
+
+class TestExtractActor:
+    def test_returns_params_and_step(self, trained_world_model, synthetic_dataset):
+        _, runner_state = make_train_step(
+            trained_world_model, synthetic_dataset, FAST_CFG, jax.random.key(0)
+        )
+        actor_params, step = extract_actor(runner_state)
+        assert isinstance(actor_params, dict)
+        assert step == 0
+
+    def test_step_advances_after_training(self, trained_world_model, synthetic_dataset):
+        step_fn, runner_state = make_train_step(
+            trained_world_model, synthetic_dataset, FAST_CFG, jax.random.key(0)
+        )
+        new_runner_state, _ = step_fn(runner_state, None)
+        _, step = extract_actor(new_runner_state)
+        assert step == 1

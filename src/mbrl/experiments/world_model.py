@@ -37,6 +37,7 @@ def run(cfg: DictConfig, logger: Logger) -> None:
         "act_dim": info.act_dim,
         "dataset_id": info.dataset_id,
         "world_model_cfg": OmegaConf.to_container(cfg.world_model),
+        "wm_group": logger.wm_group,
     }
     checkpoint_path = Path(cfg.checkpoint_dir) / "world_model.pkl"
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
