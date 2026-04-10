@@ -12,8 +12,8 @@ checkpoint_dir: checkpoints
 wandb:
   enabled: false
   entity: model-based-eggroll
-  group: null   # auto-generated if null: {world_model}-{policy_optimizer}-{dataset}
-  name: null    # auto-generated if null: {group}-{stage_suffix}-s{seed}
+  name: null    # auto-generated if null: see logger._auto_name
+  tags: []      # e.g. [final, rerun, ablation]
 
 eval:
   num_episodes: 10
