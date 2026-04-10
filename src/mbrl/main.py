@@ -52,6 +52,14 @@ def main(cfg: DictConfig) -> None:
             wm_ckpt = base_checkpoint_dir / "world_model.pkl"
         with open(wm_ckpt, "rb") as f:
             ckpt = pickle.load(f)
+        ckpt_dataset = ckpt.get("dataset_id", "<unknown>")
+        if ckpt_dataset != cfg.dataset.name:
+            raise ValueError(
+                f"Dataset mismatch: config specifies '{cfg.dataset.name}' but "
+                f"world model checkpoint was trained on '{ckpt_dataset}'. "
+                f"Pass checkpoint_dir= pointing to the correct run, or re-train "
+                f"the world model with dataset={cfg.dataset.name.split('/')[-2]}."
+            )
         wm_group = ckpt["wm_group"]
 
     logger = Logger(cfg, wm_group=wm_group, timestamp=timestamp)
