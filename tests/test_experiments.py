@@ -12,6 +12,7 @@ import pytest
 from mbrl.data import DatasetInfo, Transition
 from mbrl.experiments import world_model as world_model_exp
 from mbrl.logger import Logger
+from mbrl.main import _update_latest_symlink
 
 DATASET_ID = "mujoco/halfcheetah/medium-v0"
 OBS_DIM = 4
@@ -89,6 +90,8 @@ class TestWorldModelRun:
         assert ckpt["act_dim"] == ACT_DIM
         assert ckpt["dataset_id"] == DATASET_ID
         assert ckpt["params"] is not None
+        assert "wm_group" in ckpt
+        assert isinstance(ckpt["wm_group"], str)
 
     def test_log_fn_called_each_epoch(self, run_cfg, synthetic_dataset):
         dataset, info = synthetic_dataset
@@ -107,3 +110,19 @@ class TestWorldModelRun:
         assert len(log_calls) == run_cfg.world_model.num_epochs
         assert all("train_loss" in c for c in log_calls)
         assert all("val_mse" in c for c in log_calls)
+
+
+class TestUpdateLatestSymlink:
+    def test_creates_symlink(self, tmp_path):
+        (tmp_path / "run-1").mkdir()
+        _update_latest_symlink(tmp_path, "run-1")
+        link = tmp_path / "latest"
+        assert link.is_symlink()
+        assert link.resolve() == (tmp_path / "run-1").resolve()
+
+    def test_updates_existing_symlink(self, tmp_path):
+        (tmp_path / "run-1").mkdir()
+        (tmp_path / "run-2").mkdir()
+        _update_latest_symlink(tmp_path, "run-1")
+        _update_latest_symlink(tmp_path, "run-2")
+        assert (tmp_path / "latest").resolve() == (tmp_path / "run-2").resolve()

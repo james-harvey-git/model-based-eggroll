@@ -21,7 +21,7 @@ from omegaconf import DictConfig, OmegaConf
 import wandb
 
 from mbrl import experiments
-from mbrl.logger import Logger
+from mbrl.logger import Logger, auto_tags
 
 
 def compose_config(overrides: dict | None = None) -> DictConfig:
@@ -64,6 +64,13 @@ def sweep_run() -> None:
     OmegaConf.update(cfg, "wandb.enabled", True)
     OmegaConf.update(cfg, "stage", "policy")
 
+    # Apply full auto tag set — from_existing_run() skips wandb.init() so
+    # tags are not set automatically; apply them explicitly here.
+    if wandb.run is not None:
+        existing = set(wandb.run.tags or ())
+        new_tags = set(auto_tags(cfg))
+        wandb.run.tags = tuple(sorted(existing | new_tags))
+
     # Each sweep run writes its policy checkpoint to a run-specific subdir
     # so concurrent runs don't clobber each other.
     run_id = wandb.run.id if wandb.run is not None else "local"
@@ -78,6 +85,7 @@ def sweep_run() -> None:
         if not link.exists():
             link.symlink_to(Path(wm_path).resolve())
 
+    OmegaConf.update(cfg, "policy_checkpoint_dir", str(cfg.checkpoint_dir))
     logger = Logger.from_existing_run(cfg)
     try:
         experiments.policy.run(cfg, logger)

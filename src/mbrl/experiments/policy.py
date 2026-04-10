@@ -111,7 +111,7 @@ def run(cfg: DictConfig, logger: Logger) -> None:
         "dataset_id": info.dataset_id,
         "policy_optimizer_cfg": OmegaConf.to_container(cfg.policy_optimizer),
     }
-    checkpoint_path = Path(cfg.checkpoint_dir) / "policy.pkl"
+    checkpoint_path = Path(cfg.policy_checkpoint_dir) / "policy.pkl"
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     with open(checkpoint_path, "wb") as f:
         pickle.dump(checkpoint, f)
