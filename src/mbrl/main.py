@@ -36,10 +36,10 @@ def _update_latest_symlink(base_dir: Path, wm_group: str) -> None:
 def _find_latest_wm_for_dataset(base_dir: Path, dataset_name: str) -> Path:
     """Return the most recent world_model.pkl under base_dir trained on dataset_name.
 
-    Matches by the dataset short-name embedded in the checkpoint directory name
-    (e.g. 'halfcheetah-medium' for 'mujoco/halfcheetah/medium-v0'), then confirms
-    by reading dataset_id from the pkl. Raises FileNotFoundError with a clear message
-    if no matching checkpoint exists.
+    Uses the dataset short-name to pre-filter candidate directories, then confirms
+    by reading dataset_id from the pkl to ensure an exact match. This handles cases
+    where dataset names share a prefix (e.g. hopper-medium vs hopper-medium-replay).
+    Raises FileNotFoundError with a clear message if no matching checkpoint exists.
     """
     parts = dataset_name.split("/")
     env = parts[1] if len(parts) > 1 else dataset_name
@@ -53,21 +53,25 @@ def _find_latest_wm_for_dataset(base_dir: Path, dataset_name: str) -> Path:
             f"  python src/mbrl/main.py stage=world_model"
         )
 
-    candidates = sorted(
-        [
-            d / "world_model.pkl"
-            for d in base_dir.iterdir()
-            if d.is_dir() and dataset_short in d.name and (d / "world_model.pkl").exists()
-        ],
-        key=lambda p: p.stat().st_mtime,
-    )
+    candidates = []
+    for d in base_dir.iterdir():
+        if not d.is_dir() or dataset_short not in d.name:
+            continue
+        pkl = d / "world_model.pkl"
+        if not pkl.exists():
+            continue
+        with open(pkl, "rb") as f:
+            ckpt = pickle.load(f)
+        if ckpt.get("dataset_id") == dataset_name:
+            candidates.append(pkl)
+
     if not candidates:
         raise FileNotFoundError(
             f"No world model checkpoint found for dataset '{dataset_name}' "
             f"under '{base_dir}'.\n"
             f"Train one with: python src/mbrl/main.py stage=world_model"
         )
-    return candidates[-1]
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 @hydra.main(version_base=None, config_path="../../configs", config_name="config")
