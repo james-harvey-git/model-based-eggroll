@@ -13,7 +13,7 @@
 #   # → prints: Sweep ID: <SWEEP_ID>
 #
 #   # 3. Submit the sweep array (2 GPUs, 6 runs each = 12 concurrent)
-#   SWEEP_ID=<SWEEP_ID> WM_CHECKPOINT=$HOME/model-based-eggroll/checkpoints/world_model.pkl \
+#   SWEEP_ID=<SWEEP_ID> WM_CHECKPOINT=$HOME/model-based-eggroll/checkpoints/latest/world_model.pkl \
 #       sbatch scripts/run_sweep_eit.slurm
 #
 # Submit from the model-based-eggroll/ directory.
@@ -56,6 +56,10 @@ export MINARI_DATASETS_PATH="${MINARI_CACHE}"
 # Fail early with a clear message if required env vars are not set
 : "${SWEEP_ID:?SWEEP_ID must be set — run init_sweep.py to get it}"
 : "${WM_CHECKPOINT:?WM_CHECKPOINT must be set to the path of world_model.pkl}"
+if [[ ! -f "${WM_CHECKPOINT}" ]]; then
+    echo "ERROR: WM_CHECKPOINT file not found: ${WM_CHECKPOINT}" >&2
+    exit 1
+fi
 export WM_CHECKPOINT
 
 # ── JAX memory settings ────────────────────────────────────────────────────────
