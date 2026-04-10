@@ -57,6 +57,9 @@ logs/
 outputs/
 multirun/
 
+# W&B run logs
+wandb/
+
 # OS
 Thumbs.db
 ehthumbs.db

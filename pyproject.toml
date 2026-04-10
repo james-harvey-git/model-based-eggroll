@@ -48,3 +48,4 @@ select = ["E", "W", "F", "I"]
 [tool.ruff.lint.isort]
 force-sort-within-sections = true
 known-first-party = ["mbrl"]
+known-third-party = ["wandb"]

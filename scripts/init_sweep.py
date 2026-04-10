@@ -7,9 +7,8 @@ Usage (run once from the repo root before submitting the SLURM array):
 
 import sys
 
-import yaml
-
 import wandb
+import yaml
 
 
 def main() -> None:
