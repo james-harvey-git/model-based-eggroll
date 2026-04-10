@@ -1,0 +1,10 @@
+program: scripts/sweep.py
+method: grid
+metric:
+  name: policy/normalized_score
+  goal: maximize
+parameters:
+  penalty_coeff:
+    values: [0.5, 1.0, 2.5, 5.0]
+  lr:
+    values: [1e-4, 3e-4, 1e-3]
