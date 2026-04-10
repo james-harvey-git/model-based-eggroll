@@ -5,9 +5,26 @@
 #   sbatch scripts/run_pipeline_eit.slurm [hydra-overrides...]
 #
 # Examples:
+#   # Full pipeline (WM + policy + eval in one job)
 #   sbatch scripts/run_pipeline_eit.slurm stage=all
-#   sbatch scripts/run_pipeline_eit.slurm stage=world_model dataset=halfcheetah_medium seed=1
-#   sbatch scripts/run_pipeline_eit.slurm stage=all world_model=mle policy_optimizer=mopo seed=42
+#
+#   # Train world model only — creates checkpoints/<wm_group>/ and updates checkpoints/latest
+#   sbatch scripts/run_pipeline_eit.slurm stage=world_model seed=1
+#
+#   # Train policy against the latest WM checkpoint (checkpoint_dir auto-resolves via latest/)
+#   sbatch scripts/run_pipeline_eit.slurm stage=policy
+#
+#   # Train policy against a specific WM run
+#   sbatch scripts/run_pipeline_eit.slurm stage=policy \
+#       checkpoint_dir=checkpoints/mle-halfcheetah-medium-s0-20260410-143022
+#
+#   # Evaluate the most recent policy run (policy_checkpoint_dir auto-resolved)
+#   sbatch scripts/run_pipeline_eit.slurm stage=eval
+#
+#   # Evaluate a specific policy run
+#   sbatch scripts/run_pipeline_eit.slurm stage=eval \
+#       checkpoint_dir=checkpoints/mle-halfcheetah-medium-s0-20260410-143022 \
+#       policy_checkpoint_dir=checkpoints/mle-halfcheetah-medium-s0-20260410-143022/policies/mopo-s0-20260410-150000
 #
 # Any arguments are forwarded directly to Hydra as CLI overrides.
 # Submit from the model-based-eggroll/ directory.
