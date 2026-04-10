@@ -44,6 +44,12 @@ def main(cfg: DictConfig) -> None:
         OmegaConf.update(cfg, "checkpoint_dir", str(base_checkpoint_dir / wm_group))
     else:  # policy or eval — read wm_group from existing checkpoint
         wm_ckpt = base_checkpoint_dir / "world_model.pkl"
+        if not wm_ckpt.exists():
+            # Fall back to latest symlink for the common split-stage workflow where
+            # checkpoint_dir is left at its default and latest/ points to the last WM run.
+            base_checkpoint_dir = (base_checkpoint_dir / "latest").resolve()
+            OmegaConf.update(cfg, "checkpoint_dir", str(base_checkpoint_dir))
+            wm_ckpt = base_checkpoint_dir / "world_model.pkl"
         with open(wm_ckpt, "rb") as f:
             ckpt = pickle.load(f)
         wm_group = ckpt["wm_group"]
