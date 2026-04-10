@@ -33,6 +33,43 @@ def _update_latest_symlink(base_dir: Path, wm_group: str) -> None:
     os.replace(tmp, link)
 
 
+def _find_latest_wm_for_dataset(base_dir: Path, dataset_name: str) -> Path:
+    """Return the most recent world_model.pkl under base_dir trained on dataset_name.
+
+    Matches by the dataset short-name embedded in the checkpoint directory name
+    (e.g. 'halfcheetah-medium' for 'mujoco/halfcheetah/medium-v0'), then confirms
+    by reading dataset_id from the pkl. Raises FileNotFoundError with a clear message
+    if no matching checkpoint exists.
+    """
+    parts = dataset_name.split("/")
+    env = parts[1] if len(parts) > 1 else dataset_name
+    split = parts[2].rsplit("-v", 1)[0] if len(parts) > 2 else ""
+    dataset_short = f"{env}-{split}" if split else env
+
+    if not base_dir.exists():
+        raise FileNotFoundError(
+            f"Checkpoint directory '{base_dir}' does not exist. "
+            f"Train a world model first:\n"
+            f"  python src/mbrl/main.py stage=world_model"
+        )
+
+    candidates = sorted(
+        [
+            d / "world_model.pkl"
+            for d in base_dir.iterdir()
+            if d.is_dir() and dataset_short in d.name and (d / "world_model.pkl").exists()
+        ],
+        key=lambda p: p.stat().st_mtime,
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            f"No world model checkpoint found for dataset '{dataset_name}' "
+            f"under '{base_dir}'.\n"
+            f"Train one with: python src/mbrl/main.py stage=world_model"
+        )
+    return candidates[-1]
+
+
 @hydra.main(version_base=None, config_path="../../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -45,11 +82,11 @@ def main(cfg: DictConfig) -> None:
     else:  # policy or eval — read wm_group from existing checkpoint
         wm_ckpt = base_checkpoint_dir / "world_model.pkl"
         if not wm_ckpt.exists():
-            # Fall back to latest symlink for the common split-stage workflow where
-            # checkpoint_dir is left at its default and latest/ points to the last WM run.
-            base_checkpoint_dir = (base_checkpoint_dir / "latest").resolve()
+            # Auto-find the most recent checkpoint for this dataset so the user
+            # doesn't need to specify checkpoint_dir for the common split-stage workflow.
+            wm_ckpt = _find_latest_wm_for_dataset(base_checkpoint_dir, cfg.dataset.name)
+            base_checkpoint_dir = wm_ckpt.parent
             OmegaConf.update(cfg, "checkpoint_dir", str(base_checkpoint_dir))
-            wm_ckpt = base_checkpoint_dir / "world_model.pkl"
         with open(wm_ckpt, "rb") as f:
             ckpt = pickle.load(f)
         ckpt_dataset = ckpt.get("dataset_id", "<unknown>")
