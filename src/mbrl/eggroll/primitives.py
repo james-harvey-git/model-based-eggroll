@@ -9,12 +9,14 @@ Changes from upstream:
 - Removed duplicate `import optax` (appeared twice in upstream noiser/eggroll.py)
 - Removed assignment to `broadcasted_sigma` in _simple_full_update (only used in a
   commented-out line; marked noqa: F841 in upstream, removed here to keep ruff clean)
+- Changed `any` → `Any` (typing) in CommonInit/CommonParams NamedTuple fields; upstream
+  used the builtin `any` function as a type annotation, which is incorrect
 """
 # ruff: noqa: E501  -- vendored code; do not reformat to fit line-length
 
 from collections import defaultdict
 from functools import partial
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -30,20 +32,20 @@ EXCLUDED = 3
 
 
 class CommonInit(NamedTuple):
-    frozen_params: any
-    params: any
-    scan_map: any
-    es_map: any
+    frozen_params: Any
+    params: Any
+    scan_map: Any
+    es_map: Any
 
 
 class CommonParams(NamedTuple):
-    noiser: any
-    frozen_noiser_params: any
-    noiser_params: any
-    frozen_params: any
-    params: any
-    es_tree_key: any
-    iterinfo: any
+    noiser: Any
+    frozen_noiser_params: Any
+    noiser_params: Any
+    frozen_params: Any
+    params: Any
+    es_tree_key: Any
+    iterinfo: Any
 
 
 # ── Noiser (base class with no-op defaults) ────────────────────────────────────
