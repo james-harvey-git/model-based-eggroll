@@ -49,3 +49,8 @@ select = ["E", "W", "F", "I"]
 force-sort-within-sections = true
 known-first-party = ["mbrl"]
 known-third-party = ["wandb"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
