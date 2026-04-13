@@ -89,6 +89,9 @@ def get_reference_scores(dataset_id: str) -> tuple[float, float]:
     # Random score: roll out a random policy in the environment
     env = expert_ds.recover_environment()
     try:
+        # Seed the action space explicitly so the random-policy baseline is
+        # reproducible across separate process runs, not just within one run.
+        env.action_space.seed(0)
         random_policy = lambda obs: env.action_space.sample()  # noqa: E731
         random_returns = rollout_policy(random_policy, env, num_episodes=100, seed=0)
     finally:
