@@ -1,19 +1,28 @@
 """Tests for the EGGROLL integration layer (primitives and training utilities).
 
-Organised in two sections:
+Organised in sections:
   - TestVendoredPrimitives  — smoke tests for mbrl/eggroll/primitives.py (vendored
                                from HyperscaleES; intentionally minimal).
   - TestInitEggrollState    — mbrl/eggroll/training.py: EGGROLLState construction.
   - TestGetIterinfos        — mbrl/eggroll/training.py: iterinfo generation.
   - TestEggrollStep         — mbrl/eggroll/training.py: update cycle.
+  - TestDynamicsNet         — mbrl/eggroll/networks.py: DynamicsNet architecture.
+  - TestPolicyNet           — mbrl/eggroll/networks.py: PolicyNet architecture.
 """
 
 import jax
 import jax.numpy as jnp
 import jax.tree_util
 
+from mbrl.eggroll.networks import DynamicsNet, PolicyNet
 from mbrl.eggroll.primitives import MLP, EggRoll
 from mbrl.eggroll.training import EGGROLLState, eggroll_step, get_iterinfos, init_eggroll_state
+
+# Dimensions used for network tests — lightweight smoke-test sizes.
+# HalfCheetah in this repo is (17, 6); use smaller dims here for speed.
+_OBS_DIM = 11
+_ACT_DIM = 3
+_HIDDEN = [32, 32]
 
 # ── Vendored primitives ────────────────────────────────────────────────────────
 
@@ -243,3 +252,139 @@ class TestEggrollStep:
         assert isinstance(new_state, EGGROLLState)
         new_leaves = jax.tree_util.tree_leaves(new_state.params)
         assert all(jnp.all(jnp.isfinite(leaf)) for leaf in new_leaves)
+
+
+# ── DynamicsNet ────────────────────────────────────────────────────────────────
+
+
+class TestDynamicsNet:
+    def test_rand_init(self):
+        init = DynamicsNet.rand_init(
+            jax.random.key(30), _OBS_DIM, _ACT_DIM, _HIDDEN,
+        )
+        assert set(init.params.keys()) == {"backbone", "max_logvar", "min_logvar"}
+        assert init.frozen_params["backbone"]["activation"] == "relu"
+        assert init.params["max_logvar"].shape == (_OBS_DIM + 1,)
+        assert init.params["min_logvar"].shape == (_OBS_DIM + 1,)
+
+    def test_forward_eval_shape(self):
+        key = jax.random.key(30)
+        init = DynamicsNet.rand_init(key, _OBS_DIM, _ACT_DIM, _HIDDEN)
+        state = init_eggroll_state(init, key, sigma=0.1, lr=1e-3)
+        obs = jnp.zeros(_OBS_DIM)
+        action = jnp.zeros(_ACT_DIM)
+        mean, logvar = DynamicsNet.forward(
+            EggRoll,
+            state.frozen_noiser_params,
+            state.noiser_params,
+            state.frozen_params,
+            state.params,
+            state.es_tree_key,
+            None,  # eval mode
+            obs,
+            action,
+        )
+        assert mean.shape == (_OBS_DIM + 1,)
+        assert logvar.shape == (_OBS_DIM + 1,)
+        assert jnp.all(jnp.isfinite(mean))
+        assert jnp.all(jnp.isfinite(logvar))
+
+    def test_logvar_clamped(self):
+        key = jax.random.key(30)
+        init = DynamicsNet.rand_init(
+            key, _OBS_DIM, _ACT_DIM, _HIDDEN,
+            max_logvar_init=0.5, min_logvar_init=-10.0,
+        )
+        state = init_eggroll_state(init, key, sigma=0.1, lr=1e-3)
+        obs = jax.random.normal(key, (_OBS_DIM,))
+        action = jax.random.normal(key, (_ACT_DIM,))
+        _, logvar = DynamicsNet.forward(
+            EggRoll,
+            state.frozen_noiser_params,
+            state.noiser_params,
+            state.frozen_params,
+            state.params,
+            state.es_tree_key,
+            None,
+            obs,
+            action,
+        )
+        assert jnp.all(logvar <= 0.5)
+        assert jnp.all(logvar >= -10.0)
+
+    def test_forward_train_shape(self):
+        num_envs = 8
+        key = jax.random.key(30)
+        init = DynamicsNet.rand_init(key, _OBS_DIM, _ACT_DIM, _HIDDEN)
+        state = init_eggroll_state(init, key, sigma=0.1, lr=1e-3)
+        iterinfos = get_iterinfos(epoch=0, num_envs=num_envs)
+        obs = jax.random.normal(key, (num_envs, _OBS_DIM))
+        action = jax.random.normal(key, (num_envs, _ACT_DIM))
+        mean, logvar = jax.vmap(
+            lambda iterinfo, o, a: DynamicsNet.forward(
+                EggRoll,
+                state.frozen_noiser_params,
+                state.noiser_params,
+                state.frozen_params,
+                state.params,
+                state.es_tree_key,
+                iterinfo,
+                o,
+                a,
+            ),
+            in_axes=(0, 0, 0),
+        )(iterinfos, obs, action)
+        assert mean.shape == (num_envs, _OBS_DIM + 1)
+        assert logvar.shape == (num_envs, _OBS_DIM + 1)
+
+
+# ── PolicyNet ──────────────────────────────────────────────────────────────────
+
+
+class TestPolicyNet:
+    def test_rand_init(self):
+        init = PolicyNet.rand_init(
+            jax.random.key(31), _OBS_DIM, _ACT_DIM, _HIDDEN,
+        )
+        assert init.frozen_params["activation"] == "relu"
+
+    def test_forward_eval_shape(self):
+        key = jax.random.key(31)
+        init = PolicyNet.rand_init(key, _OBS_DIM, _ACT_DIM, _HIDDEN)
+        state = init_eggroll_state(init, key, sigma=0.1, lr=1e-3)
+        obs = jnp.zeros(_OBS_DIM)
+        action = PolicyNet.forward(
+            EggRoll,
+            state.frozen_noiser_params,
+            state.noiser_params,
+            state.frozen_params,
+            state.params,
+            state.es_tree_key,
+            None,
+            obs,
+        )
+        assert action.shape == (_ACT_DIM,)
+        assert jnp.all(action > -1.0)
+        assert jnp.all(action < 1.0)
+
+    def test_forward_train_shape(self):
+        num_envs = 8
+        key = jax.random.key(31)
+        init = PolicyNet.rand_init(key, _OBS_DIM, _ACT_DIM, _HIDDEN)
+        state = init_eggroll_state(init, key, sigma=0.1, lr=1e-3)
+        iterinfos = get_iterinfos(epoch=0, num_envs=num_envs)
+        obs = jax.random.normal(key, (num_envs, _OBS_DIM))
+        actions = jax.vmap(
+            lambda iterinfo, o: PolicyNet.forward(
+                EggRoll,
+                state.frozen_noiser_params,
+                state.noiser_params,
+                state.frozen_params,
+                state.params,
+                state.es_tree_key,
+                iterinfo,
+                o,
+            ),
+            in_axes=(0, 0),
+        )(iterinfos, obs)
+        assert actions.shape == (num_envs, _ACT_DIM)
