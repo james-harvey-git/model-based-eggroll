@@ -1,5 +1,6 @@
 {
   "include": ["src/mbrl"],
+  "exclude": ["src/mbrl/eggroll/primitives.py"],
   "pythonVersion": "3.12",
   "typeCheckingMode": "standard",
   "venvPath": ".",
