@@ -30,7 +30,7 @@
 # ── Job metadata ───────────────────────────────────────────────────────────────
 #SBATCH --job-name=mopo-repro
 #SBATCH --partition=compute
-#SBATCH --time=04:00:00
+#SBATCH --time=06:00:00
 
 # ── Resources ──────────────────────────────────────────────────────────────────
 # Default sizing assumes up to 6 parallel replicas, each roughly matching the
