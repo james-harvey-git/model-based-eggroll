@@ -15,21 +15,21 @@ import jax.numpy as jnp
 class TestVendoredPrimitives:
     def test_all_names_importable(self):
         from mbrl.eggroll.primitives import (  # noqa: F401
-            EXCLUDED,
             EMB_PARAM,
+            EXCLUDED,
+            MLP,
+            MM,
             MM_PARAM,
             PARAM,
+            TMM,
             CommonInit,
             CommonParams,
             EggRoll,
             Embedding,
             Linear,
-            MLP,
-            MM,
             Model,
             Noiser,
             Parameter,
-            TMM,
             call_submodule,
             merge_frozen,
             merge_inits,
@@ -40,7 +40,7 @@ class TestVendoredPrimitives:
         """Smoke test: init an MLP, generate es_tree_key, run a forward pass in eval
         mode (iterinfo=None). Verifies the 4-file consolidation didn't break any
         cross-references between Noiser, Model, and the helper functions."""
-        from mbrl.eggroll.primitives import EggRoll, MLP, simple_es_tree_key
+        from mbrl.eggroll.primitives import MLP, EggRoll, simple_es_tree_key
 
         model_key, es_key = jax.random.split(jax.random.key(0))
         init = MLP.rand_init(
