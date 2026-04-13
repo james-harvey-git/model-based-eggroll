@@ -10,6 +10,7 @@ stage: all
 debug: true
 checkpoint_dir: checkpoints
 policy_checkpoint_dir: null  # set at runtime: {checkpoint_dir}/policies/{algo}-s{seed}-{timestamp}
+allow_lineage_mismatch: false  # when true, eval trusts policy.pkl lineage even if checkpoint_dir points elsewhere
 
 wandb:
   enabled: false
