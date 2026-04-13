@@ -1,5 +1,6 @@
 """Policy training experiment."""
 
+from datetime import datetime
 import importlib
 from pathlib import Path
 import pickle
@@ -11,7 +12,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from mbrl.data import load_dataset
 from mbrl.evaluation import compute_normalized_score, evaluate_policy_vectorized, get_env_id
-from mbrl.logger import Logger
+from mbrl.logger import Logger, _algorithm_type
 from mbrl.policy_optimizers.sac_n import TanhGaussianActor
 from mbrl.world_models.mle import MLEEnsemble
 
@@ -30,6 +31,8 @@ def run(cfg: DictConfig, logger: Logger) -> None:
     # Load dataset and world model checkpoint
     dataset, info = load_dataset(cfg.dataset.name)
     wm_checkpoint_path = Path(cfg.checkpoint_dir) / "world_model.pkl"
+    with open(wm_checkpoint_path, "rb") as f:
+        wm_ckpt = pickle.load(f)
     world_model = MLEEnsemble.load_from_checkpoint(wm_checkpoint_path)
 
     # Resolve the policy optimizer module via importlib convention
@@ -103,13 +106,22 @@ def run(cfg: DictConfig, logger: Logger) -> None:
         _eval_and_log(runner_state, "remainder")
 
     # Save policy checkpoint
-    actor_params, _ = pol_module.extract_actor(runner_state)
+    actor_params, step = pol_module.extract_actor(runner_state)
     checkpoint = {
         "actor_params": actor_params,
         "obs_dim": info.obs_dim,
         "act_dim": info.act_dim,
         "dataset_id": info.dataset_id,
         "policy_optimizer_cfg": OmegaConf.to_container(cfg.policy_optimizer),
+        "wm_group": logger.wm_group,
+        "seed": int(cfg.seed),
+        "stage": str(cfg.stage),
+        "algorithm": _algorithm_type(cfg),
+        "step": int(step),
+        "world_model_dataset_id": wm_ckpt["dataset_id"],
+        "world_model_checkpoint_path": str(wm_checkpoint_path.resolve()),
+        "world_model_checkpoint_parent": str(wm_checkpoint_path.parent.resolve()),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     checkpoint_path = Path(cfg.policy_checkpoint_dir) / "policy.pkl"
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
