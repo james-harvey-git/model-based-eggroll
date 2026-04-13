@@ -111,9 +111,12 @@ def eggroll_step(
     normalized = EggRoll.convert_fitnesses(
         state.frozen_noiser_params, state.noiser_params, fitnesses
     )
+    # Shallow-copy noiser_params before passing to do_updates: the upstream
+    # implementation mutates the dict in-place (noiser_params["opt_state"] = ...)
+    # so without this copy the original state's dict would be silently modified.
     noiser_params, params = EggRoll.do_updates(
         state.frozen_noiser_params,
-        state.noiser_params,
+        dict(state.noiser_params),
         state.params,
         state.es_tree_key,
         normalized,

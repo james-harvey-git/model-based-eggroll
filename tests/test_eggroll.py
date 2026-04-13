@@ -179,6 +179,22 @@ class TestEggrollStep:
             assert o.shape == n.shape
             assert o.dtype == n.dtype
 
+    def test_does_not_mutate_input_state(self):
+        """eggroll_step must not mutate the input state's noiser_params dict.
+
+        EggRoll.do_updates modifies the dict in-place; eggroll_step must copy
+        it first so callers that retain a reference to the old state see
+        consistent values.
+        """
+        state = _make_state(jax.random.key(13))
+        original_opt_state = state.noiser_params["opt_state"]
+        num_envs = 8
+        iterinfos = get_iterinfos(epoch=0, num_envs=num_envs)
+        fitnesses = jnp.arange(num_envs, dtype=jnp.float32)
+        _ = eggroll_step(state, fitnesses, iterinfos)
+        # The original state's opt_state must be the same object as before.
+        assert state.noiser_params["opt_state"] is original_opt_state
+
     def test_preserves_sigma(self):
         """eggroll_step must not modify sigma — decay is the caller's job."""
         sigma = 0.1
