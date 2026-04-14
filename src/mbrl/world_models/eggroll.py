@@ -257,7 +257,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
 
             iterinfos = get_iterinfos(epoch, pop)
             means, logvars, max_logvars, min_logvars = jax.vmap(
-                lambda it, o, a: DynamicsNet.forward_with_bounds(
+                lambda it, o, a: DynamicsNet._forward_noisy_with_bounds(
                     EggRoll, fnp, noiser_params, fp, params, etk, it, o, a
                 ),
                 in_axes=(0, 0, 0),

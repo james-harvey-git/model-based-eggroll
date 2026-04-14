@@ -312,7 +312,7 @@ class TestDynamicsNet:
         assert jnp.all(logvar <= 0.5)
         assert jnp.all(logvar >= -10.0)
 
-    def test_forward_with_bounds_matches_forward(self):
+    def test_private_forward_with_bounds_matches_forward(self):
         key = jax.random.key(30)
         init = DynamicsNet.rand_init(key, _OBS_DIM, _ACT_DIM, _HIDDEN)
         state = init_eggroll_state(init, key, sigma=0.1, lr=1e-3)
@@ -329,7 +329,7 @@ class TestDynamicsNet:
             obs,
             action,
         )
-        mean_aux, logvar_aux, max_logvar, min_logvar = DynamicsNet.forward_with_bounds(
+        mean_aux, logvar_aux, max_logvar, min_logvar = DynamicsNet._forward_noisy_with_bounds(
             EggRoll,
             state.frozen_noiser_params,
             state.noiser_params,

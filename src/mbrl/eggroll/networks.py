@@ -117,7 +117,7 @@ class DynamicsNet(Model):
         return mean, logvar
 
     @classmethod
-    def forward_with_bounds(
+    def _forward_noisy_with_bounds(
         cls,
         noiser,
         frozen_noiser_params,
@@ -129,7 +129,7 @@ class DynamicsNet(Model):
         obs: jax.Array,
         action: jax.Array,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-        """Forward pass plus perturbed logvar bounds for training diagnostics/losses."""
+        """Private helper returning bounds alongside predictions for training losses."""
         return cls._forward_with_bounds(
             CommonParams(
                 noiser,
