@@ -240,6 +240,27 @@ EGGROLL_SLOW_CFG = OmegaConf.create(
     }
 )
 
+EGGROLL_UNGROUPED_CFG = OmegaConf.create(
+    {
+        "num_members": NUM_EGGROLL_MEMBERS,
+        "hidden_dims": [8, 8],
+        "activation": "relu",
+        "num_epochs": 10,
+        "validation_split": 0.2,
+        "logvar_diff_coef": 0.01,
+        "log_interval": 5,
+        "full_validation_interval": 10,
+        "eggroll": {
+            "population_size": 8,
+            "group_size": 0,
+            "noise_reuse": 1,
+            "sigma": 0.01,
+            "sigma_decay_rate": 0.997,
+            "lr": 1e-3,
+        },
+    }
+)
+
 
 @pytest.fixture(scope="module")
 def eggroll_trained_fast(synthetic_dataset):
@@ -377,6 +398,35 @@ class TestEGGROLLEnsembleTrain:
         assert [entry["epoch"] for entry in log_data] == expected_epochs
         assert [entry["transitions_seen"] for entry in log_data] == expected_transitions
         assert [entry["forward_evals"] for entry in log_data] == expected_forward_evals
+
+    def test_group_size_zero_trains(self, synthetic_dataset):
+        model = EGGROLLEnsemble(
+            OBS_DIM,
+            ACT_DIM,
+            "mujoco/halfcheetah/medium-v0",
+            EGGROLL_UNGROUPED_CFG,
+        )
+        log_calls: list[dict] = []
+
+        def log_fn(epoch, train_loss, val_mse, transitions_seen, forward_evals):
+            log_calls.append(
+                {
+                    "epoch": int(epoch),
+                    "train_loss": float(train_loss),
+                    "transitions_seen": int(transitions_seen),
+                    "forward_evals": int(forward_evals),
+                    "val_mse": float(val_mse),
+                }
+            )
+
+        model.train(synthetic_dataset, EGGROLL_UNGROUPED_CFG, jax.random.key(52), log_fn=log_fn)
+        jax.effects_barrier()
+
+        assert model._state is not None
+        assert log_calls[-1]["transitions_seen"] == (
+            EGGROLL_UNGROUPED_CFG.eggroll.population_size * EGGROLL_UNGROUPED_CFG.num_epochs
+        )
+        assert np.isfinite(log_calls[-1]["train_loss"])
 
 
 class TestEGGROLLEnsembleCheckpoint:

@@ -179,13 +179,14 @@ class EGGROLLEnsemble(EnsembleDynamics):
         computed and logged every ``full_validation_interval`` epochs via
         ``jax.lax.cond`` + ``jax.debug.callback`` when ``log_fn`` is provided.
         """
-        assert int(cfg.eggroll.group_size) % 2 == 0, (
-            f"group_size must be even (got {cfg.eggroll.group_size})"
-        )
-        assert int(cfg.eggroll.population_size) % int(cfg.eggroll.group_size) == 0, (
-            f"group_size must divide population_size "
-            f"({cfg.eggroll.population_size} % {cfg.eggroll.group_size} != 0)"
-        )
+        group_size = int(cfg.eggroll.group_size)
+        assert group_size >= 0, f"group_size must be non-negative (got {cfg.eggroll.group_size})"
+        if group_size > 0:
+            assert group_size % 2 == 0, f"group_size must be even (got {cfg.eggroll.group_size})"
+            assert int(cfg.eggroll.population_size) % group_size == 0, (
+                f"group_size must divide population_size "
+                f"({cfg.eggroll.population_size} % {cfg.eggroll.group_size} != 0)"
+            )
 
         assert int(cfg.log_interval) > 0, f"log_interval must be positive (got {cfg.log_interval})"
         full_validation_interval = int(cfg.get("full_validation_interval", cfg.log_interval))
@@ -233,8 +234,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
         etk = state.es_tree_key
         em = state.es_map
         pop = int(cfg.eggroll.population_size)
-        group_size = int(cfg.eggroll.group_size)
-        n_prompts = pop // group_size
+        n_prompts = pop if group_size == 0 else pop // group_size
         sigma_decay = float(cfg.eggroll.sigma_decay_rate)
         log_interval = int(cfg.log_interval)
         logvar_diff_coef = float(cfg.get("logvar_diff_coef", 0.01))
@@ -245,12 +245,12 @@ class EGGROLLEnsemble(EnsembleDynamics):
             rng, noiser_params, params = carry
             rng, batch_rng = jax.random.split(rng)
 
-            # Sample n_prompts training transitions with replacement, then repeat
-            # each one group_size times.
-            # Consecutive thread-id groups see the same transition, matching
-            # EggRoll.convert_fitnesses grouping.
+            # Sample training transitions with replacement. When group_size > 0,
+            # repeat each sampled prompt group_size times so each group compares
+            # perturbations on the same transition. When group_size == 0, there
+            # is no grouping and each perturbation sees its own sampled prompt.
             prompt_idxs = jax.random.randint(batch_rng, (n_prompts,), 0, n_train)
-            idxs = jnp.repeat(prompt_idxs, group_size)
+            idxs = prompt_idxs if group_size == 0 else jnp.repeat(prompt_idxs, group_size)
             obs_b = train_data.obs[idxs]
             action_b = train_data.action[idxs]
             target_b = train_targets[idxs]
