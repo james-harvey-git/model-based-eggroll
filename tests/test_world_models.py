@@ -373,6 +373,7 @@ class TestEGGROLLEnsembleTrain:
     def test_val_mse_decreases(self, eggroll_trained_slow):
         _, log_data = eggroll_trained_slow
         assert len(log_data) > 1
+        assert log_data[0]["epoch"] == 0
         assert log_data[-1]["val_mse"] < log_data[0]["val_mse"]
 
     def test_work_counters_accumulate(self, eggroll_trained_slow):
@@ -380,7 +381,7 @@ class TestEGGROLLEnsembleTrain:
         prompts_per_epoch = (
             EGGROLL_SLOW_CFG.eggroll.population_size // EGGROLL_SLOW_CFG.eggroll.group_size
         )
-        expected_epochs = list(
+        expected_epochs = [0] + list(
             range(
                 EGGROLL_SLOW_CFG.full_validation_interval - 1,
                 EGGROLL_SLOW_CFG.num_epochs,
@@ -391,7 +392,7 @@ class TestEGGROLLEnsembleTrain:
         n_val = N - int((1 - EGGROLL_SLOW_CFG.validation_split) * N)
         expected_forward_evals = [
             (epoch + 1) * EGGROLL_SLOW_CFG.eggroll.population_size
-            + ((epoch + 1) // EGGROLL_SLOW_CFG.full_validation_interval) * n_val
+            + (1 + ((epoch + 1) // EGGROLL_SLOW_CFG.full_validation_interval)) * n_val
             for epoch in expected_epochs
         ]
 

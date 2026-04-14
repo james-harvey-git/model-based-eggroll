@@ -181,8 +181,10 @@ class EGGROLLEnsemble(EnsembleDynamics):
         mutable arrays ``(rng, noiser_params, params)`` form the traced carry.
 
         Logs train NLL every ``log_interval`` epochs. Full-validation MSE is
-        computed and logged every ``full_validation_interval`` epochs via
-        ``jax.lax.cond`` + ``jax.debug.callback`` when ``log_fn`` is provided.
+        logged at epoch 0 so the first reported validation point lines up with
+        MLE's epoch-0 logging, and then every ``full_validation_interval``
+        epochs thereafter via ``jax.lax.cond`` + ``jax.debug.callback`` when
+        ``log_fn`` is provided.
         """
         group_size = int(cfg.eggroll.group_size)
         assert group_size >= 0, f"group_size must be non-negative (got {cfg.eggroll.group_size})"
@@ -297,15 +299,20 @@ class EGGROLLEnsemble(EnsembleDynamics):
             # Functional sigma decay — no in-place mutation on the traced carry dict
             noiser_params = {**noiser_params, "sigma": noiser_params["sigma"] * sigma_decay}
 
-            # Log train loss every log_interval and full-validation MSE every
-            # full_validation_interval. `if log_fn is not None` runs at trace
-            # time (zero overhead when disabled); lax.cond handles runtime conditions.
+            # Log train loss every log_interval and full-validation MSE at
+            # epoch 0 plus every full_validation_interval thereafter. `if
+            # log_fn is not None` runs at trace time (zero overhead when
+            # disabled); lax.cond handles runtime conditions.
             if log_fn is not None:
                 _log_fn = log_fn  # capture narrowed (non-None) type for Pyright
                 train_loss = jnp.mean(losses)
-                should_full_validate = (epoch + 1) % full_validation_interval == 0
+                should_full_validate = (epoch == 0) | (
+                    (epoch + 1) % full_validation_interval == 0
+                )
                 transitions_seen = n_prompts * (epoch + 1)
                 num_full_validations = (epoch + 1) // full_validation_interval
+                if full_validation_interval != 1:
+                    num_full_validations = num_full_validations + 1
                 forward_evals = (epoch + 1) * pop + num_full_validations * n_val
 
                 def _log_train_only(_: None) -> None:
