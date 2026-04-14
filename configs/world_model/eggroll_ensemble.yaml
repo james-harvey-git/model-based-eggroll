@@ -3,15 +3,15 @@ _target_: mbrl.world_models.eggroll.EGGROLLEnsemble
 num_members: 7
 hidden_dims: [256, 256]
 activation: relu
-num_epochs: 10000
+num_epochs: 25000
 validation_split: 0.1
-log_interval: 50
-full_validation_interval: 500
+log_interval: 100
+full_validation_interval: 1000
 
 eggroll:
-  population_size: 1024
-  group_size: 8
+  population_size: 2048
+  group_size: 4
   noise_reuse: 1        # fresh perturbation directions each epoch
   sigma: 0.01
-  sigma_decay_rate: 0.9997
+  sigma_decay_rate: 0.9999
   lr: 1.0e-3
