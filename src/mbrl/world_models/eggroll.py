@@ -63,6 +63,24 @@ class EGGROLLEnsemble(EnsembleDynamics):
         instance._last_train_epoch = ckpt["last_train_epoch"]
         return instance
 
+    def checkpoint_state(self) -> EGGROLLState:
+        """Return an inference-safe EGGROLLState for checkpointing.
+
+        The training-time state contains the optax solver object in
+        ``frozen_noiser_params["solver"]``, which is not pickleable on the
+        cluster. For inference we only need the perturbation metadata plus the
+        current ``sigma``, so strip the non-serializable training-only fields.
+        Resume-training from checkpoints is not supported yet.
+        """
+        assert self._state is not None, "Must call train() before checkpoint_state()"
+        frozen_noiser_params = dict(self._state.frozen_noiser_params)
+        frozen_noiser_params.pop("solver", None)
+        noiser_params = {"sigma": self._state.noiser_params["sigma"]}
+        return self._state._replace(
+            frozen_noiser_params=frozen_noiser_params,
+            noiser_params=noiser_params,
+        )
+
     @property
     def termination_fn(self) -> Callable:
         return self._termination_fn

@@ -1,5 +1,7 @@
 """Tests for world model training methods."""
 
+import pickle
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -319,3 +321,27 @@ class TestEGGROLLEnsembleTrain:
         _, log_data = eggroll_trained_slow
         assert len(log_data) > 1
         assert log_data[-1]["val_rmse"] < log_data[0]["val_rmse"]
+
+
+class TestEGGROLLEnsembleCheckpoint:
+    def test_roundtrip_pickle_and_load(self, eggroll_trained_fast, tmp_path):
+        checkpoint = {
+            "eggroll_state": eggroll_trained_fast.checkpoint_state(),
+            "last_train_epoch": eggroll_trained_fast._last_train_epoch,
+            "obs_dim": OBS_DIM,
+            "act_dim": ACT_DIM,
+            "dataset_id": "mujoco/halfcheetah/medium-v0",
+            "world_model_cfg": OmegaConf.to_container(EGGROLL_FAST_CFG),
+            "wm_group": "test-group",
+        }
+        checkpoint_path = tmp_path / "world_model.pkl"
+        with open(checkpoint_path, "wb") as f:
+            pickle.dump(checkpoint, f)
+
+        reloaded = EGGROLLEnsemble.load_from_checkpoint(checkpoint_path)
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        means_a, stds_a = eggroll_trained_fast.predict_ensemble(obs, action)
+        means_b, stds_b = reloaded.predict_ensemble(obs, action)
+        assert jnp.allclose(means_a, means_b)
+        assert jnp.allclose(stds_a, stds_b)

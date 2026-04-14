@@ -52,7 +52,7 @@ def run(cfg: DictConfig, logger: Logger) -> None:
         assert isinstance(world_model, EGGROLLEnsemble)
         checkpoint = {
             **common,
-            "eggroll_state": world_model._state,
+            "eggroll_state": world_model.checkpoint_state(),
             "last_train_epoch": world_model._last_train_epoch,
         }
 
