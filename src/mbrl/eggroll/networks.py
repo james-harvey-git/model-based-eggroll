@@ -52,6 +52,7 @@ class DynamicsNet(Model):
         use_bias: bool = True,
         activation: str = "relu",
         dtype: str = "float32",
+        init_scheme: str = "eggroll",
         max_logvar_init: float = 0.5,
         min_logvar_init: float = -10.0,
     ) -> CommonInit:
@@ -65,6 +66,8 @@ class DynamicsNet(Model):
             use_bias: Whether to include bias terms in the MLP layers.
             activation: Activation function name (``"relu"``, ``"silu"``, ``"pqn"``).
             dtype: Parameter dtype (e.g. ``"float32"``).
+            init_scheme: Linear-layer initialisation scheme (e.g. ``"eggroll"``,
+                ``"flax_dense"``).
             max_logvar_init: Initial value for the learnable logvar upper bound.
             min_logvar_init: Initial value for the learnable logvar lower bound.
 
@@ -81,6 +84,7 @@ class DynamicsNet(Model):
             use_bias=use_bias,
             activation=activation,
             dtype=dtype,
+            init_scheme=init_scheme,
         )
         # key is reused here because raw_value is provided — the key is never used
         max_logvar = Parameter.rand_init(
@@ -191,6 +195,7 @@ class PolicyNet(Model):
         use_bias: bool = True,
         activation: str = "relu",
         dtype: str = "float32",
+        init_scheme: str = "eggroll",
     ) -> CommonInit:
         """Initialise PolicyNet parameters.
 
@@ -198,7 +203,16 @@ class PolicyNet(Model):
         only one sub-module. ``common_params.params`` in ``_forward`` is therefore
         the MLP's layer dict directly.
         """
-        return MLP.rand_init(key, obs_dim, act_dim, hidden_dims, use_bias, activation, dtype)
+        return MLP.rand_init(
+            key,
+            obs_dim,
+            act_dim,
+            hidden_dims,
+            use_bias,
+            activation,
+            dtype,
+            init_scheme=init_scheme,
+        )
 
     @classmethod
     def _forward(

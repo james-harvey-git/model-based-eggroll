@@ -10,6 +10,7 @@ Organised in sections:
   - TestPolicyNet           — mbrl/eggroll/networks.py: PolicyNet architecture.
 """
 
+from flax.linen.linear import default_kernel_init
 import jax
 import jax.numpy as jnp
 import jax.tree_util
@@ -17,7 +18,7 @@ import optax
 import pytest
 
 from mbrl.eggroll.networks import DynamicsNet, PolicyNet
-from mbrl.eggroll.primitives import MLP, EggRoll
+from mbrl.eggroll.primitives import MLP, EggRoll, Linear
 from mbrl.eggroll.training import (
     EGGROLLState,
     eggroll_step,
@@ -103,6 +104,37 @@ class TestVendoredPrimitives:
         )
         assert out.shape == (2,)
         assert jnp.all(jnp.isfinite(out))
+
+    def test_linear_flax_dense_init_matches_flax_default(self):
+        key = jax.random.key(123)
+        in_dim, out_dim = 4, 3
+        init = Linear.rand_init(
+            key,
+            in_dim=in_dim,
+            out_dim=out_dim,
+            use_bias=True,
+            dtype="float32",
+            init_scheme="flax_dense",
+        )
+
+        expected_weight = default_kernel_init(key, (in_dim, out_dim), jnp.float32).T
+        weight = init.params["weight"]
+        bias = init.params["bias"]
+
+        assert weight.shape == (out_dim, in_dim)
+        assert jnp.array_equal(weight, expected_weight)
+        assert jnp.array_equal(bias, jnp.zeros((out_dim,), dtype=jnp.float32))
+
+    def test_linear_unknown_init_scheme_raises(self):
+        with pytest.raises(ValueError, match="Unsupported linear init scheme"):
+            Linear.rand_init(
+                jax.random.key(124),
+                in_dim=4,
+                out_dim=3,
+                use_bias=True,
+                dtype="float32",
+                init_scheme="unknown",
+            )
 
 
 # ── Training utilities ─────────────────────────────────────────────────────────

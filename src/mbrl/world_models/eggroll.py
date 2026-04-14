@@ -230,6 +230,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
             act_dim=self.act_dim,
             hidden_dims=list(cfg.hidden_dims),
             activation=cfg.activation,
+            init_scheme=str(cfg.get("init_scheme", "eggroll")),
         )
         state = init_eggroll_state(
             common_init,
