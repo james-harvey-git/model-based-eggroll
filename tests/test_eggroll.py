@@ -312,6 +312,39 @@ class TestDynamicsNet:
         assert jnp.all(logvar <= 0.5)
         assert jnp.all(logvar >= -10.0)
 
+    def test_forward_with_bounds_matches_forward(self):
+        key = jax.random.key(30)
+        init = DynamicsNet.rand_init(key, _OBS_DIM, _ACT_DIM, _HIDDEN)
+        state = init_eggroll_state(init, key, sigma=0.1, lr=1e-3)
+        obs = jax.random.normal(key, (_OBS_DIM,))
+        action = jax.random.normal(key, (_ACT_DIM,))
+        mean, logvar = DynamicsNet.forward(
+            EggRoll,
+            state.frozen_noiser_params,
+            state.noiser_params,
+            state.frozen_params,
+            state.params,
+            state.es_tree_key,
+            None,
+            obs,
+            action,
+        )
+        mean_aux, logvar_aux, max_logvar, min_logvar = DynamicsNet.forward_with_bounds(
+            EggRoll,
+            state.frozen_noiser_params,
+            state.noiser_params,
+            state.frozen_params,
+            state.params,
+            state.es_tree_key,
+            None,
+            obs,
+            action,
+        )
+        assert jnp.allclose(mean, mean_aux)
+        assert jnp.allclose(logvar, logvar_aux)
+        assert max_logvar.shape == (_OBS_DIM + 1,)
+        assert min_logvar.shape == (_OBS_DIM + 1,)
+
     def test_forward_train_shape(self):
         num_envs = 8
         key = jax.random.key(30)

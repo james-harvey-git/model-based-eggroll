@@ -237,6 +237,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
         n_prompts = pop // group_size
         sigma_decay = float(cfg.eggroll.sigma_decay_rate)
         log_interval = int(cfg.log_interval)
+        logvar_diff_coef = float(cfg.get("logvar_diff_coef", 0.01))
         n_train = train_data.obs.shape[0]
         n_val = val_data.obs.shape[0]
 
@@ -255,18 +256,22 @@ class EGGROLLEnsemble(EnsembleDynamics):
             target_b = train_targets[idxs]
 
             iterinfos = get_iterinfos(epoch, pop)
-            means, logvars = jax.vmap(
-                lambda it, o, a: DynamicsNet.forward(
+            means, logvars, max_logvars, min_logvars = jax.vmap(
+                lambda it, o, a: DynamicsNet.forward_with_bounds(
                     EggRoll, fnp, noiser_params, fp, params, etk, it, o, a
                 ),
                 in_axes=(0, 0, 0),
             )(iterinfos, obs_b, action_b)
 
-            # Per-perturbation Gaussian NLL (negated: higher fitness = lower NLL)
-            fitnesses = -0.5 * jnp.sum(
-                logvars + (target_b - means) ** 2 / jnp.exp(logvars),
+            # Per-perturbation regularized MLE loss (higher fitness = lower loss).
+            mse_loss = jnp.sum(
+                ((target_b - means) ** 2) * jnp.exp(-logvars),
                 axis=-1,
             )
+            var_loss = jnp.sum(logvars, axis=-1)
+            logvar_diff = jnp.sum(max_logvars - min_logvars, axis=-1)
+            losses = mse_loss + var_loss + logvar_diff_coef * logvar_diff
+            fitnesses = -losses
 
             # EGGROLL parameter update.
             # dict(noiser_params) shallow-copies before do_updates mutates it in-place.
@@ -283,7 +288,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
             # time (zero overhead when disabled); lax.cond handles runtime conditions.
             if log_fn is not None:
                 _log_fn = log_fn  # capture narrowed (non-None) type for Pyright
-                train_nll = -jnp.mean(fitnesses)
+                train_loss = jnp.mean(losses)
                 should_full_validate = (epoch + 1) % full_validation_interval == 0
                 transitions_seen = n_prompts * (epoch + 1)
                 num_full_validations = (epoch + 1) // full_validation_interval
@@ -293,7 +298,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
                     jax.debug.callback(
                         _log_fn,
                         epoch,
-                        train_nll,
+                        train_loss,
                         jnp.nan,
                         transitions_seen,
                         forward_evals,
@@ -310,7 +315,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
                     jax.debug.callback(
                         _log_fn,
                         epoch,
-                        train_nll,
+                        train_loss,
                         val_mse,
                         transitions_seen,
                         forward_evals,

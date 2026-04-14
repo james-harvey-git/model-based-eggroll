@@ -205,6 +205,7 @@ EGGROLL_FAST_CFG = OmegaConf.create(
         "activation": "relu",
         "num_epochs": 20,
         "validation_split": 0.2,
+        "logvar_diff_coef": 0.01,
         "log_interval": 5,
         "full_validation_interval": 10,
         "eggroll": {
@@ -225,6 +226,7 @@ EGGROLL_SLOW_CFG = OmegaConf.create(
         "activation": "relu",
         "num_epochs": 200,
         "validation_split": 0.2,
+        "logvar_diff_coef": 0.01,
         "log_interval": 10,
         "full_validation_interval": 20,
         "eggroll": {

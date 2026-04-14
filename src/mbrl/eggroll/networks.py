@@ -113,6 +113,45 @@ class DynamicsNet(Model):
             Tuple of ``(mean, logvar)``, each shape ``(obs_dim + 1,)``.
             ``mean[..., :-1]`` is delta_obs, ``mean[..., -1]`` is reward.
         """
+        mean, logvar, _, _ = cls._forward_with_bounds(common_params, obs, action)
+        return mean, logvar
+
+    @classmethod
+    def forward_with_bounds(
+        cls,
+        noiser,
+        frozen_noiser_params,
+        noiser_params,
+        frozen_params,
+        params,
+        es_tree_key,
+        iterinfo,
+        obs: jax.Array,
+        action: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        """Forward pass plus perturbed logvar bounds for training diagnostics/losses."""
+        return cls._forward_with_bounds(
+            CommonParams(
+                noiser,
+                frozen_noiser_params,
+                noiser_params,
+                frozen_params,
+                params,
+                es_tree_key,
+                iterinfo,
+            ),
+            obs,
+            action,
+        )
+
+    @classmethod
+    def _forward_with_bounds(
+        cls,
+        common_params: CommonParams,
+        obs: jax.Array,
+        action: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        """Forward pass returning mean, logvar, max_logvar, and min_logvar."""
         obs_action = jnp.concatenate([obs, action], axis=-1)
         output = call_submodule(MLP, "backbone", common_params, obs_action)
         half = output.shape[-1] // 2
@@ -124,7 +163,7 @@ class DynamicsNet(Model):
         logvar = max_logvar - jax.nn.softplus(max_logvar - raw_logvar)
         logvar = min_logvar + jax.nn.softplus(logvar - min_logvar)
 
-        return mean, logvar
+        return mean, logvar, max_logvar, min_logvar
 
 
 # ── PolicyNet ──────────────────────────────────────────────────────────────────
