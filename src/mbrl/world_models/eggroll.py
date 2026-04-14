@@ -264,11 +264,11 @@ class EGGROLLEnsemble(EnsembleDynamics):
             )(iterinfos, obs_b, action_b)
 
             # Per-perturbation regularized MLE loss (higher fitness = lower loss).
-            mse_loss = jnp.sum(
+            mse_loss = jnp.mean(
                 ((target_b - means) ** 2) * jnp.exp(-logvars),
                 axis=-1,
             )
-            var_loss = jnp.sum(logvars, axis=-1)
+            var_loss = jnp.mean(logvars, axis=-1)
             logvar_diff = jnp.sum(max_logvars - min_logvars, axis=-1)
             losses = mse_loss + var_loss + logvar_diff_coef * logvar_diff
             fitnesses = -losses
