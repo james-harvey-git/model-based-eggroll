@@ -12,9 +12,9 @@ full_validation_interval: 5000
 eggroll:
   population_size: 4096
   group_size: 2
-  solver: sgd
-  solver_kwargs: {}
+  solver: adamw
+  solver_kwargs: {weight_decay=1e-5}
   noise_reuse: 1        # fresh perturbation directions each epoch
   sigma: 0.01
   sigma_decay_rate: 0.999985
-  lr: 1.0e-3
+  lr: 3e-4
