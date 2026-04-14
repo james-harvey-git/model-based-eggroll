@@ -22,7 +22,12 @@ from omegaconf import DictConfig, OmegaConf
 from mbrl.data import Transition, train_val_split
 from mbrl.eggroll.networks import DynamicsNet
 from mbrl.eggroll.primitives import EggRoll
-from mbrl.eggroll.training import EGGROLLState, get_iterinfos, init_eggroll_state
+from mbrl.eggroll.training import (
+    EGGROLLState,
+    get_iterinfos,
+    init_eggroll_state,
+    resolve_optax_solver,
+)
 from mbrl.world_models.base import EnsembleDynamics
 from mbrl.world_models.termination_fns import get_termination_fn
 
@@ -208,6 +213,13 @@ class EGGROLLEnsemble(EnsembleDynamics):
 
         train_targets = _targets(train_data)
         val_targets = _targets(val_data)
+        solver_name = str(cfg.eggroll.get("solver", "sgd"))
+        solver_kwargs_cfg = cfg.eggroll.get("solver_kwargs", {})
+        solver_kwargs = (
+            OmegaConf.to_container(solver_kwargs_cfg, resolve=True)
+            if isinstance(solver_kwargs_cfg, DictConfig)
+            else dict(solver_kwargs_cfg or {})
+        )
 
         # Initialise DynamicsNet + EGGROLL state
         common_init = DynamicsNet.rand_init(
@@ -224,6 +236,8 @@ class EGGROLLEnsemble(EnsembleDynamics):
             lr=float(cfg.eggroll.lr),
             group_size=int(cfg.eggroll.group_size),
             noise_reuse=int(cfg.eggroll.noise_reuse),
+            solver=resolve_optax_solver(solver_name),
+            solver_kwargs=solver_kwargs,
         )
 
         # Static closures — captured once outside fori_loop.

@@ -13,10 +13,18 @@ Organised in sections:
 import jax
 import jax.numpy as jnp
 import jax.tree_util
+import optax
+import pytest
 
 from mbrl.eggroll.networks import DynamicsNet, PolicyNet
 from mbrl.eggroll.primitives import MLP, EggRoll
-from mbrl.eggroll.training import EGGROLLState, eggroll_step, get_iterinfos, init_eggroll_state
+from mbrl.eggroll.training import (
+    EGGROLLState,
+    eggroll_step,
+    get_iterinfos,
+    init_eggroll_state,
+    resolve_optax_solver,
+)
 
 # Dimensions used for network tests — lightweight smoke-test sizes.
 # HalfCheetah in this repo is (17, 6); use smaller dims here for speed.
@@ -142,6 +150,35 @@ class TestInitEggrollState:
         )
         state = init_eggroll_state(common_init, es_key, sigma=0.05, lr=1e-3)
         assert state.noiser_params["sigma"] == 0.05
+
+    def test_accepts_nondefault_solver(self):
+        model_key, es_key = jax.random.split(jax.random.key(3))
+        common_init = MLP.rand_init(
+            model_key, in_dim=4, out_dim=2, hidden_dims=[8],
+            use_bias=True, activation="relu", dtype="float32",
+        )
+        state = init_eggroll_state(
+            common_init,
+            es_key,
+            sigma=0.05,
+            lr=1e-3,
+            solver=resolve_optax_solver("adam"),
+        )
+        assert state.noiser_params["opt_state"] is not None
+
+
+class TestResolveOptaxSolver:
+    def test_supported_solver_names(self):
+        assert resolve_optax_solver("sgd") is optax.sgd
+        assert resolve_optax_solver("adam") is optax.adam
+        assert resolve_optax_solver("adamw") is optax.adamw
+
+    def test_solver_names_are_case_insensitive(self):
+        assert resolve_optax_solver("AdamW") is optax.adamw
+
+    def test_unknown_solver_raises(self):
+        with pytest.raises(ValueError, match="Unsupported EGGROLL solver"):
+            resolve_optax_solver("rmsprop")
 
 
 class TestGetIterinfos:
