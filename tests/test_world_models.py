@@ -7,6 +7,7 @@ from omegaconf import OmegaConf
 import pytest
 
 from mbrl.data import Transition
+from mbrl.world_models.eggroll import EGGROLLEnsemble
 from mbrl.world_models.mle import EnsembleDynamicsModel, MLEEnsemble
 from mbrl.world_models.termination_fns import (
     get_termination_fn,
@@ -168,3 +169,143 @@ class TestTerminationFns:
     def test_dispatcher_unknown(self):
         with pytest.raises(ValueError):
             get_termination_fn("mujoco/ant/medium-v0")
+
+
+# ---------------------------------------------------------------------------
+# EGGROLLEnsemble tests
+# ---------------------------------------------------------------------------
+
+NUM_EGGROLL_MEMBERS = 3
+
+EGGROLL_FAST_CFG = OmegaConf.create(
+    {
+        "num_members": NUM_EGGROLL_MEMBERS,
+        "hidden_dims": [8, 8],
+        "activation": "relu",
+        "num_epochs": 20,
+        "validation_split": 0.2,
+        "log_interval": 5,
+        "eggroll": {
+            "population_size": 8,
+            "group_size": 2,
+            "noise_reuse": 1,
+            "sigma": 0.01,
+            "sigma_decay_rate": 0.997,
+            "lr": 1e-3,
+        },
+    }
+)
+
+EGGROLL_SLOW_CFG = OmegaConf.create(
+    {
+        "num_members": NUM_EGGROLL_MEMBERS,
+        "hidden_dims": [8, 8],
+        "activation": "relu",
+        "num_epochs": 200,
+        "validation_split": 0.2,
+        "log_interval": 10,
+        "eggroll": {
+            "population_size": 8,
+            "group_size": 2,
+            "noise_reuse": 1,
+            "sigma": 0.01,
+            "sigma_decay_rate": 0.997,
+            "lr": 1e-3,
+        },
+    }
+)
+
+
+@pytest.fixture(scope="module")
+def eggroll_trained_fast(synthetic_dataset):
+    model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", EGGROLL_FAST_CFG)
+    model.train(synthetic_dataset, EGGROLL_FAST_CFG, jax.random.key(40))
+    return model
+
+
+@pytest.fixture(scope="module")
+def eggroll_trained_slow(synthetic_dataset):
+    model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", EGGROLL_SLOW_CFG)
+    log_data: list[dict] = []
+
+    def log_fn(epoch, train_nll, val_rmse):
+        log_data.append({"epoch": int(epoch), "val_rmse": float(val_rmse)})
+
+    model.train(synthetic_dataset, EGGROLL_SLOW_CFG, jax.random.key(41), log_fn=log_fn)
+    jax.effects_barrier()
+    return model, log_data
+
+
+class TestEGGROLLEnsembleInit:
+    def test_initial_state(self):
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", EGGROLL_FAST_CFG)
+        assert model._state is None
+        assert model._last_train_epoch == 0
+
+    def test_termination_fn_callable(self):
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", EGGROLL_FAST_CFG)
+        assert callable(model.termination_fn)
+
+
+class TestEGGROLLEnsemblePredict:
+    def test_predict_ensemble_shape(self, eggroll_trained_fast):
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        means, stds = eggroll_trained_fast.predict_ensemble(obs, action)
+        assert means.shape == (NUM_EGGROLL_MEMBERS, OBS_DIM + 1)
+        assert stds.shape == (NUM_EGGROLL_MEMBERS, OBS_DIM + 1)
+
+    def test_predict_ensemble_finite(self, eggroll_trained_fast):
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        means, stds = eggroll_trained_fast.predict_ensemble(obs, action)
+        assert jnp.all(jnp.isfinite(means))
+        assert jnp.all(jnp.isfinite(stds))
+
+    def test_predict_ensemble_members_distinct(self, eggroll_trained_fast):
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        means, _ = eggroll_trained_fast.predict_ensemble(obs, action)
+        # Different thread_ids (0, 2, 4) produce distinct perturbations
+        assert not jnp.allclose(means[0], means[1])
+
+
+class TestEGGROLLEnsembleStep:
+    def test_step_shapes(self, eggroll_trained_fast):
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        next_obs, reward, done = eggroll_trained_fast.step(obs, action, jax.random.key(0))
+        assert next_obs.shape == (OBS_DIM,)
+        assert reward.shape == ()
+        assert done.shape == ()
+
+    def test_step_finite(self, eggroll_trained_fast):
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        next_obs, reward, done = eggroll_trained_fast.step(obs, action, jax.random.key(0))
+        assert jnp.all(jnp.isfinite(next_obs))
+        assert jnp.isfinite(reward)
+
+    def test_step_aleatoric_noise(self, eggroll_trained_fast):
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        next_obs_1, _, _ = eggroll_trained_fast.step(obs, action, jax.random.key(1))
+        next_obs_2, _, _ = eggroll_trained_fast.step(obs, action, jax.random.key(2))
+        # Different rng keys should produce different samples (aleatoric noise)
+        assert not jnp.array_equal(next_obs_1, next_obs_2)
+
+
+@pytest.mark.slow
+class TestEGGROLLEnsembleTrain:
+    def test_last_train_epoch(self, eggroll_trained_slow):
+        model, _ = eggroll_trained_slow
+        assert model._last_train_epoch == 199
+
+    def test_state_populated(self, eggroll_trained_slow):
+        model, _ = eggroll_trained_slow
+        assert model._state is not None
+
+    def test_val_rmse_decreases(self, eggroll_trained_slow):
+        _, log_data = eggroll_trained_slow
+        assert len(log_data) > 1
+        assert log_data[-1]["val_rmse"] < log_data[0]["val_rmse"]

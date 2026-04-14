@@ -57,6 +57,7 @@ def run_cfg(tmp_path):
             "wandb": {"enabled": False},
             "dataset": {"name": DATASET_ID},
             "world_model": {
+                "_target_": "mbrl.world_models.mle.MLEEnsemble",
                 "num_ensemble": 3,
                 "num_elites": 2,
                 "n_layers": 2,
