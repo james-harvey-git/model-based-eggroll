@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 from omegaconf import DictConfig, OmegaConf
 
-from mbrl.data import Transition, sample_batch, train_val_split
+from mbrl.data import Transition, train_val_split
 from mbrl.eggroll.networks import DynamicsNet
 from mbrl.eggroll.primitives import EggRoll
 from mbrl.eggroll.training import EGGROLLState, get_iterinfos, init_eggroll_state
@@ -175,8 +175,9 @@ class EGGROLLEnsemble(EnsembleDynamics):
         a Python object) is captured as a closure outside the loop — only the
         mutable arrays ``(rng, noiser_params, params)`` form the traced carry.
 
-        Logs train NLL and val RMSE via ``jax.lax.cond`` + ``jax.debug.callback``
-        every ``log_interval`` epochs when ``log_fn`` is provided.
+        Logs train NLL every ``log_interval`` epochs. Full-validation MSE is
+        computed and logged every ``full_validation_interval`` epochs via
+        ``jax.lax.cond`` + ``jax.debug.callback`` when ``log_fn`` is provided.
         """
         assert int(cfg.eggroll.group_size) % 2 == 0, (
             f"group_size must be even (got {cfg.eggroll.group_size})"
@@ -186,8 +187,15 @@ class EGGROLLEnsemble(EnsembleDynamics):
             f"({cfg.eggroll.population_size} % {cfg.eggroll.group_size} != 0)"
         )
 
+        assert int(cfg.log_interval) > 0, f"log_interval must be positive (got {cfg.log_interval})"
+        full_validation_interval = int(cfg.get("full_validation_interval", cfg.log_interval))
+        assert full_validation_interval > 0, (
+            "full_validation_interval must be positive "
+            f"(got {full_validation_interval})"
+        )
+
         # Allocate all keys up front
-        rng, split_rng, init_rng, es_rng, val_rng = jax.random.split(rng, 5)
+        rng, split_rng, init_rng, es_rng = jax.random.split(rng, 4)
 
         # Split into train / val partitions
         train_data, val_data = train_val_split(dataset, cfg.validation_split, split_rng)
@@ -198,10 +206,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
             return jnp.concatenate([delta_obs, data.reward[:, None]], axis=-1)
 
         train_targets = _targets(train_data)
-
-        # Fix a val subsample for consistent logging across epochs
-        val_sample = sample_batch(val_data, min(4096, val_data.obs.shape[0]), val_rng)
-        val_target_sample = _targets(val_sample)
+        val_targets = _targets(val_data)
 
         # Initialise DynamicsNet + EGGROLL state
         common_init = DynamicsNet.rand_init(
@@ -271,25 +276,37 @@ class EGGROLLEnsemble(EnsembleDynamics):
             # Functional sigma decay — no in-place mutation on the traced carry dict
             noiser_params = {**noiser_params, "sigma": noiser_params["sigma"] * sigma_decay}
 
-            # Log every log_interval epochs via JAX-native conditional.
-            # `if log_fn is not None` runs at trace time (zero overhead when disabled);
-            # lax.cond handles the runtime condition.
+            # Log train loss every log_interval and full-validation MSE every
+            # full_validation_interval. `if log_fn is not None` runs at trace
+            # time (zero overhead when disabled); lax.cond handles runtime conditions.
             if log_fn is not None:
                 _log_fn = log_fn  # capture narrowed (non-None) type for Pyright
+                train_nll = -jnp.mean(fitnesses)
+                should_full_validate = (epoch + 1) % full_validation_interval == 0
 
-                def _do_log(_: None) -> None:
+                def _log_train_only(_: None) -> None:
+                    jax.debug.callback(_log_fn, epoch, train_nll, jnp.nan)
+
+                def _log_with_full_validation(_: None) -> None:
                     val_means, _ = jax.vmap(
                         lambda o, a: DynamicsNet.forward(
                             EggRoll, fnp, noiser_params, fp, params, etk, None, o, a
                         ),
                         in_axes=(0, 0),
-                    )(val_sample.obs, val_sample.action)
-                    val_rmse = jnp.sqrt(jnp.mean((val_means - val_target_sample) ** 2))
-                    train_nll = -jnp.mean(fitnesses)
-                    jax.debug.callback(_log_fn, epoch, train_nll, val_rmse)
+                    )(val_data.obs, val_data.action)
+                    val_mse = jnp.mean((val_means - val_targets) ** 2)
+                    jax.debug.callback(_log_fn, epoch, train_nll, val_mse)
+
+                def _do_log(_: None) -> None:
+                    jax.lax.cond(
+                        should_full_validate,
+                        _log_with_full_validation,
+                        _log_train_only,
+                        None,
+                    )
 
                 jax.lax.cond(
-                    (epoch + 1) % log_interval == 0,
+                    ((epoch + 1) % log_interval == 0) | should_full_validate,
                     _do_log,
                     lambda _: None,
                     None,

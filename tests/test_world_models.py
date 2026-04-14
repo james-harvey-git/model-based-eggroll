@@ -187,6 +187,7 @@ EGGROLL_FAST_CFG = OmegaConf.create(
         "num_epochs": 20,
         "validation_split": 0.2,
         "log_interval": 5,
+        "full_validation_interval": 10,
         "eggroll": {
             "population_size": 8,
             "group_size": 2,
@@ -206,6 +207,7 @@ EGGROLL_SLOW_CFG = OmegaConf.create(
         "num_epochs": 200,
         "validation_split": 0.2,
         "log_interval": 10,
+        "full_validation_interval": 20,
         "eggroll": {
             "population_size": 8,
             "group_size": 2,
@@ -230,8 +232,10 @@ def eggroll_trained_slow(synthetic_dataset):
     model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", EGGROLL_SLOW_CFG)
     log_data: list[dict] = []
 
-    def log_fn(epoch, train_nll, val_rmse):
-        log_data.append({"epoch": int(epoch), "val_rmse": float(val_rmse)})
+    def log_fn(epoch, train_nll, val_mse):
+        val_mse_f = float(val_mse)
+        if np.isfinite(val_mse_f):
+            log_data.append({"epoch": int(epoch), "val_mse": val_mse_f})
 
     model.train(synthetic_dataset, EGGROLL_SLOW_CFG, jax.random.key(41), log_fn=log_fn)
     jax.effects_barrier()
@@ -317,10 +321,10 @@ class TestEGGROLLEnsembleTrain:
         model, _ = eggroll_trained_slow
         assert model._state is not None
 
-    def test_val_rmse_decreases(self, eggroll_trained_slow):
+    def test_val_mse_decreases(self, eggroll_trained_slow):
         _, log_data = eggroll_trained_slow
         assert len(log_data) > 1
-        assert log_data[-1]["val_rmse"] < log_data[0]["val_rmse"]
+        assert log_data[-1]["val_mse"] < log_data[0]["val_mse"]
 
 
 class TestEGGROLLEnsembleCheckpoint:

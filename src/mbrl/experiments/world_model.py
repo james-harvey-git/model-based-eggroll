@@ -1,5 +1,6 @@
 """World model training experiment."""
 
+import math
 from pathlib import Path
 import pickle
 
@@ -27,10 +28,20 @@ def run(cfg: DictConfig, logger: Logger) -> None:
     wm_cls = get_class(cfg.world_model._target_)
     world_model = wm_cls(info.obs_dim, info.act_dim, info.dataset_id, cfg.world_model)
 
-    def log_fn(epoch: int, train_loss: float, val_mse: float) -> None:
-        logger.log_world_model_step(
-            int(epoch), train_loss=float(train_loss), val_mse=float(val_mse)
-        )
+    if isinstance(world_model, EGGROLLEnsemble):
+        def log_fn(epoch: int, train_loss: float, val_mse: float) -> None:
+            metrics = {"train_loss": float(train_loss)}
+            val_mse_f = float(val_mse)
+            if math.isfinite(val_mse_f):
+                metrics["val_mse"] = val_mse_f
+            logger.log_world_model_step(int(epoch), **metrics)
+    else:
+        def log_fn(epoch: int, train_loss: float, val_mse: float) -> None:
+            logger.log_world_model_step(
+                int(epoch),
+                train_loss=float(train_loss),
+                val_mse=float(val_mse),
+            )
 
     world_model.train(dataset, cfg.world_model, train_rng, log_fn=log_fn)
 
