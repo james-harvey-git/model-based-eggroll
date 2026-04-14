@@ -86,6 +86,19 @@ class EnsembleDynamicsModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+def _mle_work_counters(
+    epoch: int,
+    train_examples_per_epoch: int,
+    forward_evals_per_epoch: int,
+) -> tuple[int, int]:
+    """Compute cumulative work counters using Python integers."""
+    epoch_count = epoch + 1
+    return (
+        train_examples_per_epoch * epoch_count,
+        forward_evals_per_epoch * epoch_count,
+    )
+
+
 def _train_dynamics(
     train_state, cfg, train_inputs, train_targets, val_inputs, val_targets, rng, log_fn=None
 ):
@@ -147,15 +160,27 @@ def _train_dynamics(
         elite_idxs = val_mse_per_member.argsort()[:num_elites]
 
         if log_fn is not None:
-            transitions_seen = train_examples_per_epoch * (epoch + 1)
-            forward_evals = forward_evals_per_epoch * (epoch + 1)
+            _log_fn = log_fn
+
+            def _log_callback(epoch_i, train_loss_i, val_mse_i) -> None:
+                transitions_seen, forward_evals = _mle_work_counters(
+                    int(epoch_i),
+                    train_examples_per_epoch,
+                    forward_evals_per_epoch,
+                )
+                _log_fn(
+                    int(epoch_i),
+                    float(train_loss_i),
+                    float(val_mse_i),
+                    transitions_seen,
+                    forward_evals,
+                )
+
             jax.debug.callback(
-                log_fn,
+                _log_callback,
                 epoch,
                 batch_losses.mean(),
                 val_mse_per_member.mean(),
-                transitions_seen,
-                forward_evals,
             )
 
         return rng, train_state, elite_idxs
