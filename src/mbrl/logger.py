@@ -139,7 +139,7 @@ class Logger:
             wandb.run.tags = (*tags, "crashed")
 
     def log_world_model_step(self, epoch: int, **metrics: float) -> None:
-        """Log per-epoch world model training metrics (train_loss, val_mse, etc.)."""
+        """Log per-epoch world model metrics (losses plus optional work counters)."""
         if not self.enabled:
             return
         wandb.log({f"world_model/{k}": v for k, v in metrics.items()}, step=epoch)

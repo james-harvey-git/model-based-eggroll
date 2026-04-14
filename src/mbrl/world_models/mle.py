@@ -96,6 +96,10 @@ def _train_dynamics(
     num_elites = cfg.num_elites
     batch_size = cfg.batch_size
     logvar_diff_coef = cfg.logvar_diff_coef
+    num_ensemble = cfg.num_ensemble
+    train_examples_per_epoch = (train_inputs.shape[0] // batch_size) * batch_size
+    val_examples_per_epoch = (val_inputs.shape[0] // batch_size) * batch_size
+    forward_evals_per_epoch = (train_examples_per_epoch + val_examples_per_epoch) * num_ensemble
 
     def _train_step(train_state, batch):
         inputs, targets = batch
@@ -143,7 +147,16 @@ def _train_dynamics(
         elite_idxs = val_mse_per_member.argsort()[:num_elites]
 
         if log_fn is not None:
-            jax.debug.callback(log_fn, epoch, batch_losses.mean(), val_mse_per_member.mean())
+            transitions_seen = train_examples_per_epoch * (epoch + 1)
+            forward_evals = forward_evals_per_epoch * (epoch + 1)
+            jax.debug.callback(
+                log_fn,
+                epoch,
+                batch_losses.mean(),
+                val_mse_per_member.mean(),
+                transitions_seen,
+                forward_evals,
+            )
 
         return rng, train_state, elite_idxs
 

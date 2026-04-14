@@ -150,6 +150,18 @@ class TestWorldModelRun:
         assert len(log_calls) == run_cfg.world_model.num_epochs
         assert all("train_loss" in c for c in log_calls)
         assert all("val_mse" in c for c in log_calls)
+        assert all("transitions_seen" in c for c in log_calls)
+        assert all("forward_evals" in c for c in log_calls)
+        assert all("wall_time_sec" in c for c in log_calls)
+        assert [c["transitions_seen"] for c in log_calls] == sorted(
+            c["transitions_seen"] for c in log_calls
+        )
+        assert [c["forward_evals"] for c in log_calls] == sorted(
+            c["forward_evals"] for c in log_calls
+        )
+        assert [c["wall_time_sec"] for c in log_calls] == sorted(
+            c["wall_time_sec"] for c in log_calls
+        )
 
 
 class TestPolicyRun:

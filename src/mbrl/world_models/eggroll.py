@@ -238,12 +238,14 @@ class EGGROLLEnsemble(EnsembleDynamics):
         sigma_decay = float(cfg.eggroll.sigma_decay_rate)
         log_interval = int(cfg.log_interval)
         n_train = train_data.obs.shape[0]
+        n_val = val_data.obs.shape[0]
 
         def train_epoch(epoch: int, carry: tuple) -> tuple:
             rng, noiser_params, params = carry
             rng, batch_rng = jax.random.split(rng)
 
-            # Sample n_prompts distinct transitions, repeat each group_size times.
+            # Sample n_prompts training transitions with replacement, then repeat
+            # each one group_size times.
             # Consecutive thread-id groups see the same transition, matching
             # EggRoll.convert_fitnesses grouping.
             prompt_idxs = jax.random.randint(batch_rng, (n_prompts,), 0, n_train)
@@ -283,9 +285,19 @@ class EGGROLLEnsemble(EnsembleDynamics):
                 _log_fn = log_fn  # capture narrowed (non-None) type for Pyright
                 train_nll = -jnp.mean(fitnesses)
                 should_full_validate = (epoch + 1) % full_validation_interval == 0
+                transitions_seen = n_prompts * (epoch + 1)
+                num_full_validations = (epoch + 1) // full_validation_interval
+                forward_evals = (epoch + 1) * pop + num_full_validations * n_val
 
                 def _log_train_only(_: None) -> None:
-                    jax.debug.callback(_log_fn, epoch, train_nll, jnp.nan)
+                    jax.debug.callback(
+                        _log_fn,
+                        epoch,
+                        train_nll,
+                        jnp.nan,
+                        transitions_seen,
+                        forward_evals,
+                    )
 
                 def _log_with_full_validation(_: None) -> None:
                     val_means, _ = jax.vmap(
@@ -295,7 +307,14 @@ class EGGROLLEnsemble(EnsembleDynamics):
                         in_axes=(0, 0),
                     )(val_data.obs, val_data.action)
                     val_mse = jnp.mean((val_means - val_targets) ** 2)
-                    jax.debug.callback(_log_fn, epoch, train_nll, val_mse)
+                    jax.debug.callback(
+                        _log_fn,
+                        epoch,
+                        train_nll,
+                        val_mse,
+                        transitions_seen,
+                        forward_evals,
+                    )
 
                 def _do_log(_: None) -> None:
                     jax.lax.cond(

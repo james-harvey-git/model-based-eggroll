@@ -97,18 +97,37 @@ class TestMLEEnsembleTraining:
         model = MLEEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
         log_calls: list[dict] = []
 
-        def log_fn(epoch, train_loss, val_mse):
+        def log_fn(epoch, train_loss, val_mse, transitions_seen, forward_evals):
             log_calls.append(
-                {"epoch": int(epoch), "train_loss": float(train_loss), "val_mse": float(val_mse)}
+                {
+                    "epoch": int(epoch),
+                    "train_loss": float(train_loss),
+                    "val_mse": float(val_mse),
+                    "transitions_seen": int(transitions_seen),
+                    "forward_evals": int(forward_evals),
+                }
             )
 
         model.train(synthetic_dataset, FAST_CFG, jax.random.key(42), log_fn=log_fn)
         jax.effects_barrier()  # flush async callbacks before asserting
 
+        train_examples_per_epoch = int((1 - FAST_CFG.validation_split) * N)
+        val_examples_per_epoch = (N - train_examples_per_epoch) // FAST_CFG.batch_size
+        val_examples_per_epoch *= FAST_CFG.batch_size
+        forward_evals_per_epoch = (
+            train_examples_per_epoch + val_examples_per_epoch
+        ) * FAST_CFG.num_ensemble
+
         assert len(log_calls) == FAST_CFG.num_epochs
         assert all(c["epoch"] == i for i, c in enumerate(log_calls))
         assert all("train_loss" in c for c in log_calls)
         assert all("val_mse" in c for c in log_calls)
+        assert [c["transitions_seen"] for c in log_calls] == [
+            train_examples_per_epoch * (i + 1) for i in range(FAST_CFG.num_epochs)
+        ]
+        assert [c["forward_evals"] for c in log_calls] == [
+            forward_evals_per_epoch * (i + 1) for i in range(FAST_CFG.num_epochs)
+        ]
 
     def test_train_completes(self, synthetic_dataset):
         model = MLEEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
@@ -232,10 +251,17 @@ def eggroll_trained_slow(synthetic_dataset):
     model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", EGGROLL_SLOW_CFG)
     log_data: list[dict] = []
 
-    def log_fn(epoch, train_nll, val_mse):
+    def log_fn(epoch, train_nll, val_mse, transitions_seen, forward_evals):
         val_mse_f = float(val_mse)
         if np.isfinite(val_mse_f):
-            log_data.append({"epoch": int(epoch), "val_mse": val_mse_f})
+            log_data.append(
+                {
+                    "epoch": int(epoch),
+                    "val_mse": val_mse_f,
+                    "transitions_seen": int(transitions_seen),
+                    "forward_evals": int(forward_evals),
+                }
+            )
 
     model.train(synthetic_dataset, EGGROLL_SLOW_CFG, jax.random.key(41), log_fn=log_fn)
     jax.effects_barrier()
@@ -325,6 +351,30 @@ class TestEGGROLLEnsembleTrain:
         _, log_data = eggroll_trained_slow
         assert len(log_data) > 1
         assert log_data[-1]["val_mse"] < log_data[0]["val_mse"]
+
+    def test_work_counters_accumulate(self, eggroll_trained_slow):
+        _, log_data = eggroll_trained_slow
+        prompts_per_epoch = (
+            EGGROLL_SLOW_CFG.eggroll.population_size // EGGROLL_SLOW_CFG.eggroll.group_size
+        )
+        expected_epochs = list(
+            range(
+                EGGROLL_SLOW_CFG.full_validation_interval - 1,
+                EGGROLL_SLOW_CFG.num_epochs,
+                EGGROLL_SLOW_CFG.full_validation_interval,
+            )
+        )
+        expected_transitions = [prompts_per_epoch * (epoch + 1) for epoch in expected_epochs]
+        n_val = N - int((1 - EGGROLL_SLOW_CFG.validation_split) * N)
+        expected_forward_evals = [
+            (epoch + 1) * EGGROLL_SLOW_CFG.eggroll.population_size
+            + ((epoch + 1) // EGGROLL_SLOW_CFG.full_validation_interval) * n_val
+            for epoch in expected_epochs
+        ]
+
+        assert [entry["epoch"] for entry in log_data] == expected_epochs
+        assert [entry["transitions_seen"] for entry in log_data] == expected_transitions
+        assert [entry["forward_evals"] for entry in log_data] == expected_forward_evals
 
 
 class TestEGGROLLEnsembleCheckpoint:
