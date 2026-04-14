@@ -246,6 +246,16 @@ class TestEGGROLLEnsembleInit:
         model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", EGGROLL_FAST_CFG)
         assert callable(model.termination_fn)
 
+    def test_rejects_num_members_above_positive_population_half(self):
+        bad_cfg = OmegaConf.create(
+            {
+                **OmegaConf.to_container(EGGROLL_FAST_CFG),  # type: ignore[arg-type]
+                "num_members": 5,
+            }
+        )
+        with pytest.raises(AssertionError, match="num_members must be <="):
+            EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", bad_cfg)
+
 
 class TestEGGROLLEnsemblePredict:
     def test_predict_ensemble_shape(self, eggroll_trained_fast):

@@ -39,6 +39,12 @@ class EGGROLLEnsemble(EnsembleDynamics):
     def __init__(self, obs_dim: int, act_dim: int, dataset_id: str, cfg: DictConfig):
         self.obs_dim = obs_dim
         self.act_dim = act_dim
+        pop = int(cfg.eggroll.population_size)
+        num_members = int(cfg.num_members)
+        assert num_members <= pop // 2, (
+            "num_members must be <= population_size // 2 so predict_ensemble() only uses "
+            f"positive-sigma perturbations seen during training ({num_members} > {pop // 2})"
+        )
         self._cfg = cfg
         self._termination_fn = get_termination_fn(dataset_id)
         self._state: EGGROLLState | None = None  # populated by train()
