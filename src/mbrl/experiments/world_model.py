@@ -29,6 +29,7 @@ def run(cfg: DictConfig, logger: Logger) -> None:
     wm_cls = get_class(cfg.world_model._target_)
     world_model = wm_cls(info.obs_dim, info.act_dim, info.dataset_id, cfg.world_model)
     start_time = time.perf_counter()
+    max_step = max(int(cfg.world_model.num_epochs), 1)
 
     def log_fn(
         epoch: int,
@@ -44,6 +45,7 @@ def run(cfg: DictConfig, logger: Logger) -> None:
         val_mse_f = float(val_mse)
         if math.isfinite(val_mse_f):
             metrics["val_mse"] = val_mse_f
+        metrics["normalized_step"] = float(epoch) / max_step
         metrics["transitions_seen"] = float(transitions_seen)
         metrics["forward_evals"] = float(forward_evals)
         metrics["wall_time_sec"] = time.perf_counter() - start_time

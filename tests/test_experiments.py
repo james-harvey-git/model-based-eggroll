@@ -154,6 +154,7 @@ class TestWorldModelRun:
         assert len(init_calls) == 1
         assert "val_mse" in init_calls[0]
         assert "train_loss" not in init_calls[0]
+        assert init_calls[0]["normalized_step"] == 0.0
         assert "wall_time_sec" in init_calls[0]
         assert len(train_calls) == run_cfg.world_model.num_epochs
         assert [c["epoch"] for c in train_calls] == list(
@@ -161,9 +162,14 @@ class TestWorldModelRun:
         )
         assert all("train_loss" in c for c in train_calls)
         assert all("val_mse" in c for c in train_calls)
+        assert all("normalized_step" in c for c in log_calls)
         assert all("transitions_seen" in c for c in train_calls)
         assert all("forward_evals" in c for c in train_calls)
         assert all("wall_time_sec" in c for c in train_calls)
+        assert [c["normalized_step"] for c in log_calls] == sorted(
+            c["normalized_step"] for c in log_calls
+        )
+        assert log_calls[-1]["normalized_step"] == 1.0
         assert [c["transitions_seen"] for c in train_calls] == sorted(
             c["transitions_seen"] for c in train_calls
         )
