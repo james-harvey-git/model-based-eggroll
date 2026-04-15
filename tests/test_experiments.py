@@ -148,13 +148,17 @@ class TestWorldModelRun:
         jax.effects_barrier()  # flush async callbacks before asserting
 
         assert len(log_calls) == run_cfg.world_model.num_epochs + 1
-        init_calls = [c for c in log_calls if "init_val_mse" in c]
+        init_calls = [c for c in log_calls if c["epoch"] == 0]
         train_calls = [c for c in log_calls if "train_loss" in c]
 
         assert len(init_calls) == 1
-        assert init_calls[0]["epoch"] == 0
+        assert "val_mse" in init_calls[0]
+        assert "train_loss" not in init_calls[0]
         assert "wall_time_sec" in init_calls[0]
         assert len(train_calls) == run_cfg.world_model.num_epochs
+        assert [c["epoch"] for c in train_calls] == list(
+            range(1, run_cfg.world_model.num_epochs + 1)
+        )
         assert all("train_loss" in c for c in train_calls)
         assert all("val_mse" in c for c in train_calls)
         assert all("transitions_seen" in c for c in train_calls)

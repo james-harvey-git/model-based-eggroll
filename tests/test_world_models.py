@@ -118,15 +118,21 @@ class TestMLEEnsembleTraining:
             train_examples_per_epoch + val_examples_per_epoch
         ) * FAST_CFG.num_ensemble
 
-        assert len(log_calls) == FAST_CFG.num_epochs
-        assert all(c["epoch"] == i for i, c in enumerate(log_calls))
+        assert len(log_calls) == FAST_CFG.num_epochs + 1
+        assert [c["epoch"] for c in log_calls] == list(range(FAST_CFG.num_epochs + 1))
+        assert np.isnan(log_calls[0]["train_loss"])
         assert all("train_loss" in c for c in log_calls)
         assert all("val_mse" in c for c in log_calls)
         assert [c["transitions_seen"] for c in log_calls] == [
-            train_examples_per_epoch * (i + 1) for i in range(FAST_CFG.num_epochs)
+            0,
+            *[train_examples_per_epoch * i for i in range(1, FAST_CFG.num_epochs + 1)],
         ]
         assert [c["forward_evals"] for c in log_calls] == [
-            forward_evals_per_epoch * (i + 1) for i in range(FAST_CFG.num_epochs)
+            val_examples_per_epoch * FAST_CFG.num_ensemble,
+            *[
+                val_examples_per_epoch * FAST_CFG.num_ensemble + forward_evals_per_epoch * i
+                for i in range(1, FAST_CFG.num_epochs + 1)
+            ],
         ]
 
     def test_train_completes(self, synthetic_dataset):
@@ -381,19 +387,29 @@ class TestEGGROLLEnsembleTrain:
         prompts_per_epoch = (
             EGGROLL_SLOW_CFG.eggroll.population_size // EGGROLL_SLOW_CFG.eggroll.group_size
         )
-        expected_epochs = [0] + list(
+        expected_epochs = [0, 1] + list(
             range(
-                EGGROLL_SLOW_CFG.full_validation_interval - 1,
-                EGGROLL_SLOW_CFG.num_epochs,
+                EGGROLL_SLOW_CFG.full_validation_interval,
+                EGGROLL_SLOW_CFG.num_epochs + 1,
                 EGGROLL_SLOW_CFG.full_validation_interval,
             )
         )
-        expected_transitions = [prompts_per_epoch * (epoch + 1) for epoch in expected_epochs]
+        expected_transitions = [0] + [prompts_per_epoch * epoch for epoch in expected_epochs[1:]]
         n_val = N - int((1 - EGGROLL_SLOW_CFG.validation_split) * N)
         expected_forward_evals = [
-            (epoch + 1) * EGGROLL_SLOW_CFG.eggroll.population_size
-            + (1 + ((epoch + 1) // EGGROLL_SLOW_CFG.full_validation_interval)) * n_val
-            for epoch in expected_epochs
+            n_val,
+            *[
+                epoch * EGGROLL_SLOW_CFG.eggroll.population_size
+                + (
+                    1
+                    + (
+                        epoch // EGGROLL_SLOW_CFG.full_validation_interval
+                        + (0 if EGGROLL_SLOW_CFG.full_validation_interval == 1 else 1)
+                    )
+                )
+                * n_val
+                for epoch in expected_epochs[1:]
+            ],
         ]
 
         assert [entry["epoch"] for entry in log_data] == expected_epochs

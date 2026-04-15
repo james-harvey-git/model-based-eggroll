@@ -30,47 +30,26 @@ def run(cfg: DictConfig, logger: Logger) -> None:
     world_model = wm_cls(info.obs_dim, info.act_dim, info.dataset_id, cfg.world_model)
     start_time = time.perf_counter()
 
-    if isinstance(world_model, EGGROLLEnsemble):
-        def log_fn(
-            epoch: int,
-            train_loss: float,
-            val_mse: float,
-            transitions_seen: int,
-            forward_evals: int,
-        ) -> None:
-            metrics = {"train_loss": float(train_loss)}
-            val_mse_f = float(val_mse)
-            if math.isfinite(val_mse_f):
-                metrics["val_mse"] = val_mse_f
-            metrics["transitions_seen"] = float(transitions_seen)
-            metrics["forward_evals"] = float(forward_evals)
-            metrics["wall_time_sec"] = time.perf_counter() - start_time
-            logger.log_world_model_step(int(epoch), **metrics)
-    else:
-        def log_fn(
-            epoch: int,
-            train_loss: float,
-            val_mse: float,
-            transitions_seen: int,
-            forward_evals: int,
-        ) -> None:
-            logger.log_world_model_step(
-                int(epoch),
-                train_loss=float(train_loss),
-                val_mse=float(val_mse),
-                transitions_seen=float(transitions_seen),
-                forward_evals=float(forward_evals),
-                wall_time_sec=time.perf_counter() - start_time,
-            )
+    def log_fn(
+        epoch: int,
+        train_loss: float,
+        val_mse: float,
+        transitions_seen: int,
+        forward_evals: int,
+    ) -> None:
+        metrics: dict[str, float] = {}
+        train_loss_f = float(train_loss)
+        if math.isfinite(train_loss_f):
+            metrics["train_loss"] = train_loss_f
+        val_mse_f = float(val_mse)
+        if math.isfinite(val_mse_f):
+            metrics["val_mse"] = val_mse_f
+        metrics["transitions_seen"] = float(transitions_seen)
+        metrics["forward_evals"] = float(forward_evals)
+        metrics["wall_time_sec"] = time.perf_counter() - start_time
+        logger.log_world_model_step(int(epoch), **metrics)
 
-    def init_log_fn(init_val_mse: float) -> None:
-        logger.log_world_model_step(
-            0,
-            init_val_mse=float(init_val_mse),
-            wall_time_sec=time.perf_counter() - start_time,
-        )
-
-    world_model.train(dataset, cfg.world_model, train_rng, log_fn=log_fn, init_log_fn=init_log_fn)
+    world_model.train(dataset, cfg.world_model, train_rng, log_fn=log_fn)
 
     common = {
         "obs_dim": info.obs_dim,

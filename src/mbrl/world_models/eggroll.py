@@ -172,7 +172,6 @@ class EGGROLLEnsemble(EnsembleDynamics):
         cfg: DictConfig,
         rng: jax.Array,
         log_fn: Callable[..., None] | None = None,
-        init_log_fn: Callable[[float], None] | None = None,
     ) -> None:
         """Fit the ensemble to the offline dataset via EGGROLL.
 
@@ -181,11 +180,11 @@ class EGGROLLEnsemble(EnsembleDynamics):
         a Python object) is captured as a closure outside the loop — only the
         mutable arrays ``(rng, noiser_params, params)`` form the traced carry.
 
-        Logs train NLL every ``log_interval`` epochs. Full-validation MSE is
-        logged at epoch 0 so the first reported validation point lines up with
-        MLE's epoch-0 logging, and then every ``full_validation_interval``
-        epochs thereafter via ``jax.lax.cond`` + ``jax.debug.callback`` when
-        ``log_fn`` is provided.
+        Logs pre-training validation MSE at step 0 before any updates. Train
+        NLL is then logged every ``log_interval`` epochs, and full-validation
+        MSE is logged after the first update at step 1 plus every
+        ``full_validation_interval`` steps thereafter via ``jax.lax.cond`` +
+        ``jax.debug.callback`` when ``log_fn`` is provided.
         """
         group_size = int(cfg.eggroll.group_size)
         assert group_size >= 0, f"group_size must be non-negative (got {cfg.eggroll.group_size})"
@@ -216,6 +215,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
 
         train_targets = _targets(train_data)
         val_targets = _targets(val_data)
+        n_val = val_data.obs.shape[0]
         solver_name = str(cfg.eggroll.get("solver", "sgd"))
         solver_kwargs_cfg = cfg.eggroll.get("solver_kwargs", {})
         solver_kwargs = (
@@ -244,7 +244,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
             solver_kwargs=solver_kwargs,
         )
 
-        if init_log_fn is not None:
+        if log_fn is not None:
             init_val_means, _ = jax.vmap(
                 lambda o, a: DynamicsNet.forward(
                     EggRoll,
@@ -260,7 +260,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
                 in_axes=(0, 0),
             )(val_data.obs, val_data.action)
             init_val_mse = jnp.mean((init_val_means - val_targets) ** 2)
-            init_log_fn(float(init_val_mse))
+            log_fn(0, float("nan"), float(init_val_mse), 0, n_val)
 
         # Static closures — captured once outside fori_loop.
         # frozen_noiser_params holds the optax solver (a Python callable) and cannot
@@ -275,7 +275,6 @@ class EGGROLLEnsemble(EnsembleDynamics):
         log_interval = int(cfg.log_interval)
         logvar_diff_coef = float(cfg.get("logvar_diff_coef", 0.01))
         n_train = train_data.obs.shape[0]
-        n_val = val_data.obs.shape[0]
 
         def train_epoch(epoch: int, carry: tuple) -> tuple:
             rng, noiser_params, params = carry
@@ -319,26 +318,26 @@ class EGGROLLEnsemble(EnsembleDynamics):
             # Functional sigma decay — no in-place mutation on the traced carry dict
             noiser_params = {**noiser_params, "sigma": noiser_params["sigma"] * sigma_decay}
 
-            # Log train loss every log_interval and full-validation MSE at
-            # epoch 0 plus every full_validation_interval thereafter. `if
-            # log_fn is not None` runs at trace time (zero overhead when
-            # disabled); lax.cond handles runtime conditions.
+            # Log train loss every log_interval and full-validation MSE after
+            # the first training step (step 1) plus every
+            # full_validation_interval thereafter. `if log_fn is not None`
+            # runs at trace time (zero overhead when disabled); lax.cond
+            # handles runtime conditions.
             if log_fn is not None:
                 _log_fn = log_fn  # capture narrowed (non-None) type for Pyright
                 train_loss = jnp.mean(losses)
-                should_full_validate = (epoch == 0) | (
-                    (epoch + 1) % full_validation_interval == 0
-                )
-                transitions_seen = n_prompts * (epoch + 1)
-                num_full_validations = (epoch + 1) // full_validation_interval
+                step = epoch + 1
+                should_full_validate = (epoch == 0) | (step % full_validation_interval == 0)
+                transitions_seen = n_prompts * step
+                num_full_validations = step // full_validation_interval
                 if full_validation_interval != 1:
                     num_full_validations = num_full_validations + 1
-                forward_evals = (epoch + 1) * pop + num_full_validations * n_val
+                forward_evals = step * pop + (1 + num_full_validations) * n_val
 
                 def _log_train_only(_: None) -> None:
                     jax.debug.callback(
                         _log_fn,
-                        epoch,
+                        step,
                         train_loss,
                         jnp.nan,
                         transitions_seen,
@@ -355,7 +354,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
                     val_mse = jnp.mean((val_means - val_targets) ** 2)
                     jax.debug.callback(
                         _log_fn,
-                        epoch,
+                        step,
                         train_loss,
                         val_mse,
                         transitions_seen,
