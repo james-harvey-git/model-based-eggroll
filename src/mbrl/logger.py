@@ -72,7 +72,7 @@ def auto_tags(cfg: DictConfig) -> list[str]:
     auto.add(_dataset_short(cfg))
     if stage != "world_model":
         auto.add(_algorithm_type(cfg))
-    if os.environ.get("WANDB_SWEEP_ID"):
+    if _is_sweep_run():
         auto.add("sweep")
     if os.environ.get("SLURM_JOB_ID"):
         auto.add("cluster")
@@ -81,6 +81,13 @@ def auto_tags(cfg: DictConfig) -> list[str]:
 
     manual = [t.lower() for t in cfg.get("wandb", {}).get("tags", [])]
     return sorted(auto) + [t for t in manual if t not in auto]
+
+
+def _is_sweep_run() -> bool:
+    """Return True when running under a W&B sweep agent."""
+    if os.environ.get("WANDB_SWEEP_ID") or os.environ.get("SWEEP_ID"):
+        return True
+    return wandb.run is not None and getattr(wandb.run, "sweep_id", None) is not None
 
 
 # ---------------------------------------------------------------------------

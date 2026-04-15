@@ -62,6 +62,17 @@ class TestAutoTags:
         cfg = OmegaConf.create(BASE_CFG)
         assert "sweep" in auto_tags(cfg)
 
+    def test_sweep_tag_from_slurm_launcher_env(self, monkeypatch):
+        monkeypatch.setenv("SWEEP_ID", "abc123")
+        cfg = OmegaConf.create(BASE_CFG)
+        assert "sweep" in auto_tags(cfg)
+
+    def test_sweep_tag_from_active_wandb_run(self):
+        cfg = OmegaConf.create(BASE_CFG)
+        with patch("mbrl.logger.wandb") as mock_wandb:
+            mock_wandb.run = MagicMock(sweep_id="abc123")
+            assert "sweep" in auto_tags(cfg)
+
     def test_cluster_tag_from_env(self, monkeypatch):
         monkeypatch.setenv("SLURM_JOB_ID", "99999")
         cfg = OmegaConf.create(BASE_CFG)
