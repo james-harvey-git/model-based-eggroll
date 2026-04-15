@@ -257,6 +257,7 @@ class MLEEnsemble(EnsembleDynamics):
         cfg: DictConfig,
         rng: jax.Array,
         log_fn: Callable[..., None] | None = None,
+        init_log_fn: Callable[[float], None] | None = None,
     ) -> None:
         """Fit the ensemble to the offline dataset via NLL minimisation."""
         rng, split_rng, init_rng = jax.random.split(rng, 3)
@@ -282,6 +283,19 @@ class MLEEnsemble(EnsembleDynamics):
             params=params,
             tx=optax.adamw(cfg.lr, eps=1e-5, weight_decay=cfg.weight_decay),
         )
+
+        if init_log_fn is not None:
+            n_eval = (val_inputs.shape[0] // cfg.batch_size) * cfg.batch_size
+            if n_eval == 0:
+                n_eval = val_inputs.shape[0]
+            init_eval_inputs = val_inputs[:n_eval]
+            init_eval_targets = val_targets[:n_eval]
+            mean_predictions, _ = train_state.apply_fn(train_state.params, init_eval_inputs)
+            init_val_mse = jnp.mean(
+                ((mean_predictions - init_eval_targets) ** 2),
+                axis=(1, 2),
+            ).mean()
+            init_log_fn(float(init_val_mse))
 
         # Train
         rng, train_rng = jax.random.split(rng)

@@ -147,17 +147,24 @@ class TestWorldModelRun:
             world_model_exp.run(run_cfg, logger)
         jax.effects_barrier()  # flush async callbacks before asserting
 
-        assert len(log_calls) == run_cfg.world_model.num_epochs
-        assert all("train_loss" in c for c in log_calls)
-        assert all("val_mse" in c for c in log_calls)
-        assert all("transitions_seen" in c for c in log_calls)
-        assert all("forward_evals" in c for c in log_calls)
-        assert all("wall_time_sec" in c for c in log_calls)
-        assert [c["transitions_seen"] for c in log_calls] == sorted(
-            c["transitions_seen"] for c in log_calls
+        assert len(log_calls) == run_cfg.world_model.num_epochs + 1
+        init_calls = [c for c in log_calls if "init_val_mse" in c]
+        train_calls = [c for c in log_calls if "train_loss" in c]
+
+        assert len(init_calls) == 1
+        assert init_calls[0]["epoch"] == 0
+        assert "wall_time_sec" in init_calls[0]
+        assert len(train_calls) == run_cfg.world_model.num_epochs
+        assert all("train_loss" in c for c in train_calls)
+        assert all("val_mse" in c for c in train_calls)
+        assert all("transitions_seen" in c for c in train_calls)
+        assert all("forward_evals" in c for c in train_calls)
+        assert all("wall_time_sec" in c for c in train_calls)
+        assert [c["transitions_seen"] for c in train_calls] == sorted(
+            c["transitions_seen"] for c in train_calls
         )
-        assert [c["forward_evals"] for c in log_calls] == sorted(
-            c["forward_evals"] for c in log_calls
+        assert [c["forward_evals"] for c in train_calls] == sorted(
+            c["forward_evals"] for c in train_calls
         )
         assert [c["wall_time_sec"] for c in log_calls] == sorted(
             c["wall_time_sec"] for c in log_calls

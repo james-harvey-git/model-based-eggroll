@@ -63,7 +63,14 @@ def run(cfg: DictConfig, logger: Logger) -> None:
                 wall_time_sec=time.perf_counter() - start_time,
             )
 
-    world_model.train(dataset, cfg.world_model, train_rng, log_fn=log_fn)
+    def init_log_fn(init_val_mse: float) -> None:
+        logger.log_world_model_step(
+            0,
+            init_val_mse=float(init_val_mse),
+            wall_time_sec=time.perf_counter() - start_time,
+        )
+
+    world_model.train(dataset, cfg.world_model, train_rng, log_fn=log_fn, init_log_fn=init_log_fn)
 
     common = {
         "obs_dim": info.obs_dim,

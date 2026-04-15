@@ -56,5 +56,6 @@ class EnsembleDynamics(ABC):
         cfg: DictConfig,
         rng: jax.Array,
         log_fn: Callable[..., None] | None = None,
+        init_log_fn: Callable[[float], None] | None = None,
     ) -> None:
         """Fit the ensemble to the provided offline dataset."""

@@ -172,6 +172,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
         cfg: DictConfig,
         rng: jax.Array,
         log_fn: Callable[..., None] | None = None,
+        init_log_fn: Callable[[float], None] | None = None,
     ) -> None:
         """Fit the ensemble to the offline dataset via EGGROLL.
 
@@ -242,6 +243,24 @@ class EGGROLLEnsemble(EnsembleDynamics):
             solver=resolve_optax_solver(solver_name),
             solver_kwargs=solver_kwargs,
         )
+
+        if init_log_fn is not None:
+            init_val_means, _ = jax.vmap(
+                lambda o, a: DynamicsNet.forward(
+                    EggRoll,
+                    state.frozen_noiser_params,
+                    state.noiser_params,
+                    state.frozen_params,
+                    state.params,
+                    state.es_tree_key,
+                    None,
+                    o,
+                    a,
+                ),
+                in_axes=(0, 0),
+            )(val_data.obs, val_data.action)
+            init_val_mse = jnp.mean((init_val_means - val_targets) ** 2)
+            init_log_fn(float(init_val_mse))
 
         # Static closures — captured once outside fori_loop.
         # frozen_noiser_params holds the optax solver (a Python callable) and cannot
