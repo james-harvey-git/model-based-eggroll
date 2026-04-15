@@ -1,5 +1,5 @@
 #!/bin/bash
-# SLURM array job for running the EGGROLL world-model W&B sweep on the EIT CDT cluster.
+# SLURM job for running the EGGROLL world-model W&B sweep on the EIT CDT cluster.
 #
 # Default sweep config:
 #   configs/sweep/eggroll_wm_halfcheetah.yaml
@@ -10,12 +10,12 @@
 #   uv run python scripts/init_sweep.py configs/sweep/eggroll_wm_halfcheetah.yaml
 #   # → prints: Sweep ID: <SWEEP_ID>
 #
-#   # 2. Submit the array. Default sizing below covers the full 1296-trial grid:
-#   #    108 array tasks × 12 agents/GPU = 1296 total runs
-#   SWEEP_ID=<SWEEP_ID> sbatch scripts/run_eggroll_wm_sweep_eit.slurm
+#   # 2. Submit a job with however many GPUs you want to use total.
+#   #    The script launches RUNS_PER_GPU W&B agents on each allocated GPU.
+#   SWEEP_ID=<SWEEP_ID> sbatch --gres=gpu:2 scripts/run_eggroll_wm_sweep_eit.slurm
 #
-# Override the array size at submission time if you want less concurrency:
-#   SWEEP_ID=<SWEEP_ID> sbatch --array=0-53 scripts/run_eggroll_wm_sweep_eit.slurm
+#   # 3. Optionally increase packing:
+#   RUNS_PER_GPU=16 SWEEP_ID=<SWEEP_ID> sbatch --gres=gpu:2 scripts/run_eggroll_wm_sweep_eit.slurm
 
 # ── Job metadata ───────────────────────────────────────────────────────────────
 #SBATCH --job-name=eggroll-wm-sweep
@@ -29,12 +29,9 @@
 #SBATCH --mem=256G
 #SBATCH --gres=gpu:1
 
-# ── Array ──────────────────────────────────────────────────────────────────────
-#SBATCH --array=0-107
-
 # ── Logging ────────────────────────────────────────────────────────────────────
-#SBATCH --output=logs/slurm/%x_%A_%a.out
-#SBATCH --error=logs/slurm/%x_%A_%a.err
+#SBATCH --output=logs/slurm/%x_%j.out
+#SBATCH --error=logs/slurm/%x_%j.err
 
 set -euo pipefail
 
@@ -55,17 +52,32 @@ export MINARI_DATASETS_PATH="${MINARI_CACHE}"
 : "${SWEEP_ID:?SWEEP_ID must be set — run init_sweep.py to get it}"
 export SWEEP_ID
 
+# Derive the exact GPUs assigned to this job. We then pin RUNS_PER_GPU agents
+# onto each one so the total GPU usage matches the allocation the user requested.
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    IFS=',' read -r -a GPU_IDS <<< "${CUDA_VISIBLE_DEVICES}"
+else
+    mapfile -t GPU_IDS < <(nvidia-smi --query-gpu=index --format=csv,noheader)
+fi
+
+NUM_GPUS="${#GPU_IDS[@]}"
+if [[ "${NUM_GPUS}" -eq 0 ]]; then
+    echo "ERROR: no GPUs visible to the job allocation" >&2
+    exit 1
+fi
+
 # ── JAX memory settings ────────────────────────────────────────────────────────
-# Disable JAX preallocation so multiple processes can share the GPU. Cap each
-# process to an equal slice of ~90% of GPU memory.
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export XLA_PYTHON_CLIENT_MEM_FRACTION="$(awk -v runs="${RUNS_PER_GPU}" 'BEGIN { printf "%.4f", 0.90 / runs }')"
+# Disable JAX preallocation so multiple processes can share each GPU. Since
+# each agent is pinned to one GPU, the per-process cap depends only on
+# RUNS_PER_GPU, not the total number of GPUs allocated to the job.
+PER_PROCESS_MEM_FRACTION="$(awk -v runs="${RUNS_PER_GPU}" 'BEGIN { printf "%.4f", 0.90 / runs }')"
 
 # ── Diagnostics ────────────────────────────────────────────────────────────────
 echo "============================================"
-echo "Job:      ${SLURM_JOB_ID}, Task: ${SLURM_ARRAY_TASK_ID}"
+echo "Job:      ${SLURM_JOB_ID}"
 echo "Node:     $(hostname)"
 echo "GPU(s):   ${CUDA_VISIBLE_DEVICES:-<none>}"
+echo "Num GPUs: ${NUM_GPUS}"
 echo "Sweep:    ${SWEEP_ID}"
 echo "Runs/GPU: ${RUNS_PER_GPU}"
 echo "Dir:      $(pwd)"
@@ -73,9 +85,16 @@ nvidia-smi
 echo "============================================"
 
 # ── Launch parallel sweep trials ───────────────────────────────────────────────
-for i in $(seq 1 "${RUNS_PER_GPU}"); do
-    uv run wandb agent --count 1 "model-based-eggroll/model-based-eggroll/${SWEEP_ID}" &
+# Launch RUNS_PER_GPU agents per allocated GPU, pinning each subprocess to a
+# single device. Agents keep claiming work until the sweep queue is exhausted.
+for gpu_id in "${GPU_IDS[@]}"; do
+    for i in $(seq 1 "${RUNS_PER_GPU}"); do
+        CUDA_VISIBLE_DEVICES="${gpu_id}" \
+        XLA_PYTHON_CLIENT_PREALLOCATE=false \
+        XLA_PYTHON_CLIENT_MEM_FRACTION="${PER_PROCESS_MEM_FRACTION}" \
+        uv run wandb agent "model-based-eggroll/model-based-eggroll/${SWEEP_ID}" &
+    done
 done
 
 wait
-echo "All ${RUNS_PER_GPU} trials on task ${SLURM_ARRAY_TASK_ID} finished."
+echo "All sweep agents on job ${SLURM_JOB_ID} finished."
