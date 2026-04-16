@@ -32,6 +32,22 @@ from mbrl.world_models.base import EnsembleDynamics
 from mbrl.world_models.termination_fns import get_termination_fn
 
 
+def _eggroll_work_counters(
+    step: int,
+    n_prompts: int,
+    population_size: int,
+    n_val: int,
+    full_validation_interval: int,
+) -> tuple[int, int]:
+    """Compute cumulative work counters using Python integers."""
+    transitions_seen = n_prompts * step
+    num_full_validations = step // full_validation_interval
+    if full_validation_interval != 1:
+        num_full_validations += 1
+    forward_evals = step * population_size + (1 + num_full_validations) * n_val
+    return transitions_seen, forward_evals
+
+
 class EGGROLLEnsemble(EnsembleDynamics):
     """Ensemble of dynamics models fitted via EGGROLL.
 
@@ -328,18 +344,44 @@ class EGGROLLEnsemble(EnsembleDynamics):
                 train_loss = jnp.mean(losses)
                 step = epoch + 1
                 should_full_validate = (epoch == 0) | (step % full_validation_interval == 0)
-                transitions_seen = n_prompts * step
-                num_full_validations = step // full_validation_interval
-                if full_validation_interval != 1:
-                    num_full_validations = num_full_validations + 1
-                forward_evals = step * pop + (1 + num_full_validations) * n_val
+
+                def _log_train_callback(step_i, train_loss_i) -> None:
+                    step_py = int(step_i)
+                    transitions_seen, forward_evals = _eggroll_work_counters(
+                        step_py,
+                        n_prompts,
+                        pop,
+                        n_val,
+                        full_validation_interval,
+                    )
+                    _log_fn(
+                        step_py,
+                        float(train_loss_i),
+                        float("nan"),
+                        transitions_seen,
+                        forward_evals,
+                    )
 
                 def _log_train_only(_: None) -> None:
                     jax.debug.callback(
-                        _log_fn,
+                        _log_train_callback,
                         step,
                         train_loss,
-                        jnp.nan,
+                    )
+
+                def _log_val_callback(step_i, train_loss_i, val_mse_i) -> None:
+                    step_py = int(step_i)
+                    transitions_seen, forward_evals = _eggroll_work_counters(
+                        step_py,
+                        n_prompts,
+                        pop,
+                        n_val,
+                        full_validation_interval,
+                    )
+                    _log_fn(
+                        step_py,
+                        float(train_loss_i),
+                        float(val_mse_i),
                         transitions_seen,
                         forward_evals,
                     )
@@ -353,12 +395,10 @@ class EGGROLLEnsemble(EnsembleDynamics):
                     )(val_data.obs, val_data.action)
                     val_mse = jnp.mean((val_means - val_targets) ** 2)
                     jax.debug.callback(
-                        _log_fn,
+                        _log_val_callback,
                         step,
                         train_loss,
                         val_mse,
-                        transitions_seen,
-                        forward_evals,
                     )
 
                 def _do_log(_: None) -> None:

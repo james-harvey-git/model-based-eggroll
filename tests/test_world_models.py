@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 import pytest
 
 from mbrl.data import Transition
-from mbrl.world_models.eggroll import EGGROLLEnsemble
+from mbrl.world_models.eggroll import EGGROLLEnsemble, _eggroll_work_counters
 from mbrl.world_models.mle import EnsembleDynamicsModel, MLEEnsemble
 from mbrl.world_models.termination_fns import (
     get_termination_fn,
@@ -368,6 +368,21 @@ class TestEGGROLLEnsembleStep:
 
 @pytest.mark.slow
 class TestEGGROLLEnsembleTrain:
+    def test_work_counter_helper_uses_python_ints_for_large_values(self):
+        step = 600_000
+        transitions_seen, forward_evals = _eggroll_work_counters(
+            step=step,
+            n_prompts=4_096,
+            population_size=4_096,
+            n_val=200_000,
+            full_validation_interval=5_000,
+        )
+
+        assert isinstance(transitions_seen, int)
+        assert isinstance(forward_evals, int)
+        assert transitions_seen == 2_457_600_000
+        assert forward_evals == 2_481_800_000
+
     def test_last_train_epoch(self, eggroll_trained_slow):
         model, _ = eggroll_trained_slow
         assert model._last_train_epoch == 199
