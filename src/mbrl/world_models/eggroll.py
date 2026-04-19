@@ -42,6 +42,8 @@ def _eggroll_work_counters(
     """Compute cumulative work counters using Python integers."""
     transitions_seen = n_prompts * step
     num_full_validations = step // full_validation_interval
+    if full_validation_interval != 1:
+        num_full_validations += 1
     forward_evals = step * population_size + (1 + num_full_validations) * n_val
     return transitions_seen, forward_evals
 

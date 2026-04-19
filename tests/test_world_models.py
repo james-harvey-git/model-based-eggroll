@@ -381,7 +381,7 @@ class TestEGGROLLEnsembleTrain:
         assert isinstance(transitions_seen, int)
         assert isinstance(forward_evals, int)
         assert transitions_seen == 2_457_600_000
-        assert forward_evals == 2_481_800_000
+        assert forward_evals == 2_482_000_000
 
     def test_last_train_epoch(self, eggroll_trained_slow):
         model, _ = eggroll_trained_slow
