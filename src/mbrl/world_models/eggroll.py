@@ -258,6 +258,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
             noise_reuse=int(cfg.eggroll.noise_reuse),
             solver=resolve_optax_solver(solver_name),
             solver_kwargs=solver_kwargs,
+            use_batched_update=bool(cfg.eggroll.get("use_batched_update", False)),
         )
 
         if log_fn is not None:

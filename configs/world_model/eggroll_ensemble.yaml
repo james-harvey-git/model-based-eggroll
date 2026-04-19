@@ -19,3 +19,4 @@ eggroll:
   sigma: 0.005
   sigma_decay_rate: 0.999995
   lr: 3e-4
+  use_batched_update: true
