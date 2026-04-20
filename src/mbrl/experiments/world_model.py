@@ -29,14 +29,23 @@ def run(cfg: DictConfig, logger: Logger) -> None:
     wm_cls = get_class(cfg.world_model._target_)
     world_model = wm_cls(info.obs_dim, info.act_dim, info.dataset_id, cfg.world_model)
     start_time = time.perf_counter()
-    max_step = max(int(cfg.world_model.num_epochs), 1)
+
+    # Normalize the x-axis to update-step count (1 update per epoch for EGGROLL;
+    # batches_per_epoch updates per epoch for MLE).
+    if isinstance(world_model, MLEEnsemble):
+        n_train = int((1 - cfg.world_model.validation_split) * dataset.obs.shape[0])
+        updates_per_epoch = max(n_train // cfg.world_model.batch_size, 1)
+    else:
+        updates_per_epoch = 1
+    max_step = max(int(cfg.world_model.num_epochs) * updates_per_epoch, 1)
 
     def log_fn(
-        epoch: int,
+        step: int,
         train_loss: float,
         val_mse: float,
         transitions_seen: int,
         forward_evals: int,
+        epoch: int | None = None,
     ) -> None:
         metrics: dict[str, float] = {}
         train_loss_f = float(train_loss)
@@ -45,11 +54,13 @@ def run(cfg: DictConfig, logger: Logger) -> None:
         val_mse_f = float(val_mse)
         if math.isfinite(val_mse_f):
             metrics["val_mse"] = val_mse_f
-        metrics["normalized_step"] = float(epoch) / max_step
+        if epoch is not None:
+            metrics["epoch"] = float(epoch)
+        metrics["normalized_step"] = float(step) / max_step
         metrics["transitions_seen"] = float(transitions_seen)
         metrics["forward_evals"] = float(forward_evals)
         metrics["wall_time_sec"] = time.perf_counter() - start_time
-        logger.log_world_model_step(int(epoch), **metrics)
+        logger.log_world_model_step(int(step), **metrics)
 
     world_model.train(dataset, cfg.world_model, train_rng, log_fn=log_fn)
 

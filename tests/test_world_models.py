@@ -97,10 +97,11 @@ class TestMLEEnsembleTraining:
         model = MLEEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
         log_calls: list[dict] = []
 
-        def log_fn(epoch, train_loss, val_mse, transitions_seen, forward_evals):
+        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals, epoch=None):
             log_calls.append(
                 {
-                    "epoch": int(epoch),
+                    "step": int(step),
+                    "epoch": None if epoch is None else int(epoch),
                     "train_loss": float(train_loss),
                     "val_mse": float(val_mse),
                     "transitions_seen": int(transitions_seen),
@@ -111,15 +112,21 @@ class TestMLEEnsembleTraining:
         model.train(synthetic_dataset, FAST_CFG, jax.random.key(42), log_fn=log_fn)
         jax.effects_barrier()  # flush async callbacks before asserting
 
-        train_examples_per_epoch = int((1 - FAST_CFG.validation_split) * N)
-        val_examples_per_epoch = (N - train_examples_per_epoch) // FAST_CFG.batch_size
+        n_train = int((1 - FAST_CFG.validation_split) * N)
+        batches_per_epoch = n_train // FAST_CFG.batch_size
+        train_examples_per_epoch = batches_per_epoch * FAST_CFG.batch_size
+        val_examples_per_epoch = (N - n_train) // FAST_CFG.batch_size
         val_examples_per_epoch *= FAST_CFG.batch_size
         forward_evals_per_epoch = (
             train_examples_per_epoch + val_examples_per_epoch
         ) * FAST_CFG.num_ensemble
 
         assert len(log_calls) == FAST_CFG.num_epochs + 1
+        # epoch is the logical epoch counter; step is cumulative update steps
         assert [c["epoch"] for c in log_calls] == list(range(FAST_CFG.num_epochs + 1))
+        assert [c["step"] for c in log_calls] == [
+            epoch * batches_per_epoch for epoch in range(FAST_CFG.num_epochs + 1)
+        ]
         assert np.isnan(log_calls[0]["train_loss"])
         assert all("train_loss" in c for c in log_calls)
         assert all("val_mse" in c for c in log_calls)

@@ -87,15 +87,15 @@ class EnsembleDynamicsModel(nn.Module):
 
 
 def _mle_work_counters(
-    step: int,
+    epoch: int,
     train_examples_per_epoch: int,
     forward_evals_per_epoch: int,
     init_forward_evals: int,
 ) -> tuple[int, int]:
-    """Compute cumulative work counters using Python integers."""
+    """Compute cumulative work counters (keyed on completed epochs) as Python ints."""
     return (
-        train_examples_per_epoch * step,
-        init_forward_evals + forward_evals_per_epoch * step,
+        train_examples_per_epoch * epoch,
+        init_forward_evals + forward_evals_per_epoch * epoch,
     )
 
 
@@ -110,7 +110,8 @@ def _train_dynamics(
     batch_size = cfg.batch_size
     logvar_diff_coef = cfg.logvar_diff_coef
     num_ensemble = cfg.num_ensemble
-    train_examples_per_epoch = (train_inputs.shape[0] // batch_size) * batch_size
+    batches_per_epoch = train_inputs.shape[0] // batch_size
+    train_examples_per_epoch = batches_per_epoch * batch_size
     val_examples_per_epoch = (val_inputs.shape[0] // batch_size) * batch_size
     if val_examples_per_epoch == 0:
         val_examples_per_epoch = val_inputs.shape[0]
@@ -166,19 +167,21 @@ def _train_dynamics(
             _log_fn = log_fn
 
             def _log_callback(epoch_i, train_loss_i, val_mse_i) -> None:
-                step_i = int(epoch_i) + 1
+                epoch_py = int(epoch_i) + 1
+                update_step = epoch_py * batches_per_epoch
                 transitions_seen, forward_evals = _mle_work_counters(
-                    step_i,
+                    epoch_py,
                     train_examples_per_epoch,
                     forward_evals_per_epoch,
                     init_forward_evals,
                 )
                 _log_fn(
-                    step_i,
+                    update_step,
                     float(train_loss_i),
                     float(val_mse_i),
                     transitions_seen,
                     forward_evals,
+                    epoch=epoch_py,
                 )
 
             jax.debug.callback(
@@ -305,6 +308,7 @@ class MLEEnsemble(EnsembleDynamics):
                 float(init_val_mse),
                 0,
                 n_eval * cfg.num_ensemble,
+                epoch=0,
             )
 
         # Train

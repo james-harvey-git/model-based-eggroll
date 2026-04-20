@@ -138,8 +138,8 @@ class TestWorldModelRun:
         log_calls: list[dict] = []
 
         class SpyLogger(Logger):
-            def log_world_model_step(self, epoch: int, **metrics: float) -> None:
-                log_calls.append({"epoch": epoch, **metrics})
+            def log_world_model_step(self, step: int, **metrics: float) -> None:
+                log_calls.append({"step": step, **metrics})
 
         logger = SpyLogger(run_cfg)
 
@@ -147,22 +147,33 @@ class TestWorldModelRun:
             world_model_exp.run(run_cfg, logger)
         jax.effects_barrier()  # flush async callbacks before asserting
 
+        n_train = int((1 - run_cfg.world_model.validation_split) * N)
+        batches_per_epoch = n_train // run_cfg.world_model.batch_size
+
         assert len(log_calls) == run_cfg.world_model.num_epochs + 1
-        init_calls = [c for c in log_calls if c["epoch"] == 0]
+        init_calls = [c for c in log_calls if c["step"] == 0]
         train_calls = [c for c in log_calls if "train_loss" in c]
 
         assert len(init_calls) == 1
         assert "val_mse" in init_calls[0]
         assert "train_loss" not in init_calls[0]
         assert init_calls[0]["normalized_step"] == 0.0
+        assert init_calls[0]["epoch"] == 0.0
         assert "wall_time_sec" in init_calls[0]
         assert len(train_calls) == run_cfg.world_model.num_epochs
-        assert [c["epoch"] for c in train_calls] == list(
-            range(1, run_cfg.world_model.num_epochs + 1)
-        )
+        # MLE: wandb step is cumulative update steps (epoch * batches_per_epoch)
+        assert [c["step"] for c in train_calls] == [
+            epoch * batches_per_epoch
+            for epoch in range(1, run_cfg.world_model.num_epochs + 1)
+        ]
+        # Epoch is tracked as a separate metric for MLE
+        assert [c["epoch"] for c in train_calls] == [
+            float(epoch) for epoch in range(1, run_cfg.world_model.num_epochs + 1)
+        ]
         assert all("train_loss" in c for c in train_calls)
         assert all("val_mse" in c for c in train_calls)
         assert all("normalized_step" in c for c in log_calls)
+        assert all("epoch" in c for c in log_calls)
         assert all("transitions_seen" in c for c in train_calls)
         assert all("forward_evals" in c for c in train_calls)
         assert all("wall_time_sec" in c for c in train_calls)

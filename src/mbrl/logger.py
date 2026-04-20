@@ -145,11 +145,11 @@ class Logger:
         if "crashed" not in tags:
             wandb.run.tags = (*tags, "crashed")
 
-    def log_world_model_step(self, epoch: int, **metrics: float) -> None:
-        """Log per-epoch world model metrics (losses plus optional work counters)."""
+    def log_world_model_step(self, step: int, **metrics: float) -> None:
+        """Log per-update-step world model metrics (losses plus optional work counters)."""
         if not self.enabled:
             return
-        wandb.log({f"world_model/{k}": v for k, v in metrics.items()}, step=epoch)
+        wandb.log({f"world_model/{k}": v for k, v in metrics.items()}, step=step)
 
     def log_policy_step(self, step: int, **metrics: float) -> None:
         """Log policy training metrics (return, entropy, critic loss, etc.)."""
