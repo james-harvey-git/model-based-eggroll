@@ -1,0 +1,21 @@
+program: scripts/sweep_world_model.py
+method: random
+run_cap: 400
+metric:
+  name: world_model/val_mse
+  goal: minimize
+parameters:
+  population_size:
+    values: [2048, 4096]
+  group_size:
+    values: [0, 2, 4, 8]
+  weight_decay:
+    values: [0, 1e-5, 1e-4]
+  b1:
+    values: [0.9, 0.95]
+  sigma:
+    values: [0.005, 0.01, 0.02]
+  sigma_decay_rate:
+    values: [0.99997, 0.999985, 0.999995]
+  lr:
+    values: [1e-4, 3e-4, 1e-3]
