@@ -1,6 +1,22 @@
 _target_: mbrl.world_models.eggroll.EGGROLLEnsemble
 
 num_members: 7
+hidden_dims: [200, 200, 200, 200]
+activation: pqn
+init_scheme: eggroll
+num_epochs: 150000
+validation_split: 0.2
+logvar_diff_coef: 0.01
+log_interval: 500
+full_validation_interval: 5000
+
 eggroll:
-  population_size: 256
-  sigma: 0.01
+  population_size: 4096
+  group_size: 4
+  solver: adamw
+  solver_kwargs: {weight_decay: 1e-5, b1: 0.9}
+  noise_reuse: 1        # fresh perturbation directions each epoch
+  sigma: 0.005
+  sigma_decay_rate: 0.999995
+  lr: 3e-4
+  use_batched_update: true

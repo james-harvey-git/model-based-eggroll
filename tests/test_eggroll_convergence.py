@@ -26,7 +26,7 @@ from mbrl.eggroll.training import eggroll_step, get_iterinfos, init_eggroll_stat
 _HC_OBS_DIM = 17
 _HC_ACT_DIM = 6
 _HC_HIDDEN = [256, 256]
-_HC_NUM_ENVS = 256  # matches configs/world_model/eggroll_ensemble.yaml population_size
+_HC_NUM_ENVS = 256  # reduced test budget; production config may use a larger population
 
 
 def _rss_mb() -> float:
@@ -145,8 +145,8 @@ class TestToyConvergence:
 class TestNetworkScale:
     """DynamicsNet / PolicyNet at HalfCheetah scale with realistic population.
 
-    Uses obs_dim=17, act_dim=6, hidden=[256, 256], pop=256 — matching the
-    project's eggroll_ensemble.yaml config. Confirms:
+    Uses obs_dim=17, act_dim=6, hidden=[256, 256], pop=256 as a manageable
+    test-budget stress case. Confirms:
       - vmap over the full population produces correct shapes
       - all outputs are finite
       - each perturbation produces a distinct output (vmap is non-trivial)

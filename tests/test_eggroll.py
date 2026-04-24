@@ -10,13 +10,22 @@ Organised in sections:
   - TestPolicyNet           — mbrl/eggroll/networks.py: PolicyNet architecture.
 """
 
+from flax.linen.linear import default_kernel_init
 import jax
 import jax.numpy as jnp
 import jax.tree_util
+import optax
+import pytest
 
 from mbrl.eggroll.networks import DynamicsNet, PolicyNet
-from mbrl.eggroll.primitives import MLP, EggRoll
-from mbrl.eggroll.training import EGGROLLState, eggroll_step, get_iterinfos, init_eggroll_state
+from mbrl.eggroll.primitives import MLP, EggRoll, Linear
+from mbrl.eggroll.training import (
+    EGGROLLState,
+    eggroll_step,
+    get_iterinfos,
+    init_eggroll_state,
+    resolve_optax_solver,
+)
 
 # Dimensions used for network tests — lightweight smoke-test sizes.
 # HalfCheetah in this repo is (17, 6); use smaller dims here for speed.
@@ -96,6 +105,37 @@ class TestVendoredPrimitives:
         assert out.shape == (2,)
         assert jnp.all(jnp.isfinite(out))
 
+    def test_linear_flax_dense_init_matches_flax_default(self):
+        key = jax.random.key(123)
+        in_dim, out_dim = 4, 3
+        init = Linear.rand_init(
+            key,
+            in_dim=in_dim,
+            out_dim=out_dim,
+            use_bias=True,
+            dtype="float32",
+            init_scheme="flax_dense",
+        )
+
+        expected_weight = default_kernel_init(key, (in_dim, out_dim), jnp.float32).T
+        weight = init.params["weight"]
+        bias = init.params["bias"]
+
+        assert weight.shape == (out_dim, in_dim)
+        assert jnp.array_equal(weight, expected_weight)
+        assert jnp.array_equal(bias, jnp.zeros((out_dim,), dtype=jnp.float32))
+
+    def test_linear_unknown_init_scheme_raises(self):
+        with pytest.raises(ValueError, match="Unsupported linear init scheme"):
+            Linear.rand_init(
+                jax.random.key(124),
+                in_dim=4,
+                out_dim=3,
+                use_bias=True,
+                dtype="float32",
+                init_scheme="unknown",
+            )
+
 
 # ── Training utilities ─────────────────────────────────────────────────────────
 
@@ -142,6 +182,35 @@ class TestInitEggrollState:
         )
         state = init_eggroll_state(common_init, es_key, sigma=0.05, lr=1e-3)
         assert state.noiser_params["sigma"] == 0.05
+
+    def test_accepts_nondefault_solver(self):
+        model_key, es_key = jax.random.split(jax.random.key(3))
+        common_init = MLP.rand_init(
+            model_key, in_dim=4, out_dim=2, hidden_dims=[8],
+            use_bias=True, activation="relu", dtype="float32",
+        )
+        state = init_eggroll_state(
+            common_init,
+            es_key,
+            sigma=0.05,
+            lr=1e-3,
+            solver=resolve_optax_solver("adam"),
+        )
+        assert state.noiser_params["opt_state"] is not None
+
+
+class TestResolveOptaxSolver:
+    def test_supported_solver_names(self):
+        assert resolve_optax_solver("sgd") is optax.sgd
+        assert resolve_optax_solver("adam") is optax.adam
+        assert resolve_optax_solver("adamw") is optax.adamw
+
+    def test_solver_names_are_case_insensitive(self):
+        assert resolve_optax_solver("AdamW") is optax.adamw
+
+    def test_unknown_solver_raises(self):
+        with pytest.raises(ValueError, match="Unsupported EGGROLL solver"):
+            resolve_optax_solver("rmsprop")
 
 
 class TestGetIterinfos:
@@ -311,6 +380,39 @@ class TestDynamicsNet:
         )
         assert jnp.all(logvar <= 0.5)
         assert jnp.all(logvar >= -10.0)
+
+    def test_private_forward_with_bounds_matches_forward(self):
+        key = jax.random.key(30)
+        init = DynamicsNet.rand_init(key, _OBS_DIM, _ACT_DIM, _HIDDEN)
+        state = init_eggroll_state(init, key, sigma=0.1, lr=1e-3)
+        obs = jax.random.normal(key, (_OBS_DIM,))
+        action = jax.random.normal(key, (_ACT_DIM,))
+        mean, logvar = DynamicsNet.forward(
+            EggRoll,
+            state.frozen_noiser_params,
+            state.noiser_params,
+            state.frozen_params,
+            state.params,
+            state.es_tree_key,
+            None,
+            obs,
+            action,
+        )
+        mean_aux, logvar_aux, max_logvar, min_logvar = DynamicsNet._forward_noisy_with_bounds(
+            EggRoll,
+            state.frozen_noiser_params,
+            state.noiser_params,
+            state.frozen_params,
+            state.params,
+            state.es_tree_key,
+            None,
+            obs,
+            action,
+        )
+        assert jnp.allclose(mean, mean_aux)
+        assert jnp.allclose(logvar, logvar_aux)
+        assert max_logvar.shape == (_OBS_DIM + 1,)
+        assert min_logvar.shape == (_OBS_DIM + 1,)
 
     def test_forward_train_shape(self):
         num_envs = 8

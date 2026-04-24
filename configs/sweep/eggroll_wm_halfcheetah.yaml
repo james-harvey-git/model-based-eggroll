@@ -1,0 +1,22 @@
+program: scripts/sweep_world_model.py
+method: grid
+metric:
+  name: world_model/val_mse
+  goal: minimize
+parameters:
+  population_size:
+    values: [2048]
+  group_size:
+    values: [8]
+  weight_decay:
+    values: [1e-5]
+  b1:
+    values: [0.9]
+  sigma:
+    values: [0.02]
+  sigma_decay_rate:
+    values: [0.99995, 0.999995]
+  lr:
+    values: [3e-4]
+  num_epochs:
+    values: [1250000]
