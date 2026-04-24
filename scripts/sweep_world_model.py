@@ -54,6 +54,7 @@ def compose_config(overrides: dict | None = None) -> DictConfig:
             "sigma": "world_model.eggroll.sigma",
             "sigma_decay_rate": "world_model.eggroll.sigma_decay_rate",
             "lr": "world_model.eggroll.lr",
+            "num_epochs": "world_model.num_epochs",
         }
         for key, path in mapping.items():
             if key in overrides:

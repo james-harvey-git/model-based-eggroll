@@ -5,16 +5,18 @@ metric:
   goal: minimize
 parameters:
   population_size:
-    values: [2048, 4096]
+    values: [2048]
   group_size:
-    values: [0, 2, 4, 8]
+    values: [8]
   weight_decay:
-    values: [0, 1e-5, 1e-4]
+    values: [1e-5]
   b1:
-    values: [0.9, 0.95]
+    values: [0.9]
   sigma:
-    values: [0.005, 0.01, 0.02]
+    values: [0.02]
   sigma_decay_rate:
-    values: [0.99997, 0.999985, 0.999995]
+    values: [0.99995, 0.999995]
   lr:
-    values: [1e-4, 3e-4, 1e-3]
+    values: [3e-4]
+  num_epochs:
+    values: [1250000]
