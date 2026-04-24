@@ -46,6 +46,10 @@ def compose_config(overrides: dict | None = None) -> DictConfig:
     OmegaConf.update(base, "world_model.eggroll.solver", "adamw")
 
     if overrides:
+        if "one_minus_sigma_decay_rate" in overrides:
+            overrides["sigma_decay_rate"] = 1.0 - float(
+                overrides.pop("one_minus_sigma_decay_rate")
+            )
         mapping = {
             "population_size": "world_model.eggroll.population_size",
             "group_size": "world_model.eggroll.group_size",
