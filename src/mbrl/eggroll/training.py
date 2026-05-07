@@ -9,6 +9,7 @@ from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import optax
 
 from mbrl.eggroll.primitives import CommonInit, EggRoll, simple_es_tree_key
 
@@ -29,6 +30,24 @@ class EGGROLLState(NamedTuple):
     params: Any  # model weights — updated by do_updates
     es_tree_key: Any  # per-parameter PRNG keys — fixed after init
     es_map: Any  # per-parameter update classification (PARAM / MM_PARAM / …)
+
+
+_OPTAX_SOLVERS: dict[str, Any] = {
+    "sgd": optax.sgd,
+    "adam": optax.adam,
+    "adamw": optax.adamw,
+}
+
+
+def resolve_optax_solver(name: str) -> Any:
+    """Resolve a supported Optax solver name for EGGROLL updates."""
+    solver_name = name.lower()
+    if solver_name not in _OPTAX_SOLVERS:
+        supported = ", ".join(sorted(_OPTAX_SOLVERS))
+        raise ValueError(
+            f"Unsupported EGGROLL solver '{name}'. Supported solvers: {supported}"
+        )
+    return _OPTAX_SOLVERS[solver_name]
 
 
 def init_eggroll_state(

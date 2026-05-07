@@ -52,6 +52,7 @@ class DynamicsNet(Model):
         use_bias: bool = True,
         activation: str = "relu",
         dtype: str = "float32",
+        init_scheme: str = "eggroll",
         max_logvar_init: float = 0.5,
         min_logvar_init: float = -10.0,
     ) -> CommonInit:
@@ -65,6 +66,8 @@ class DynamicsNet(Model):
             use_bias: Whether to include bias terms in the MLP layers.
             activation: Activation function name (``"relu"``, ``"silu"``, ``"pqn"``).
             dtype: Parameter dtype (e.g. ``"float32"``).
+            init_scheme: Linear-layer initialisation scheme (e.g. ``"eggroll"``,
+                ``"flax_dense"``).
             max_logvar_init: Initial value for the learnable logvar upper bound.
             min_logvar_init: Initial value for the learnable logvar lower bound.
 
@@ -81,6 +84,7 @@ class DynamicsNet(Model):
             use_bias=use_bias,
             activation=activation,
             dtype=dtype,
+            init_scheme=init_scheme,
         )
         # key is reused here because raw_value is provided — the key is never used
         max_logvar = Parameter.rand_init(
@@ -113,6 +117,45 @@ class DynamicsNet(Model):
             Tuple of ``(mean, logvar)``, each shape ``(obs_dim + 1,)``.
             ``mean[..., :-1]`` is delta_obs, ``mean[..., -1]`` is reward.
         """
+        mean, logvar, _, _ = cls._forward_with_bounds(common_params, obs, action)
+        return mean, logvar
+
+    @classmethod
+    def _forward_noisy_with_bounds(
+        cls,
+        noiser,
+        frozen_noiser_params,
+        noiser_params,
+        frozen_params,
+        params,
+        es_tree_key,
+        iterinfo,
+        obs: jax.Array,
+        action: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        """Private helper returning bounds alongside predictions for training losses."""
+        return cls._forward_with_bounds(
+            CommonParams(
+                noiser,
+                frozen_noiser_params,
+                noiser_params,
+                frozen_params,
+                params,
+                es_tree_key,
+                iterinfo,
+            ),
+            obs,
+            action,
+        )
+
+    @classmethod
+    def _forward_with_bounds(
+        cls,
+        common_params: CommonParams,
+        obs: jax.Array,
+        action: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        """Forward pass returning mean, logvar, max_logvar, and min_logvar."""
         obs_action = jnp.concatenate([obs, action], axis=-1)
         output = call_submodule(MLP, "backbone", common_params, obs_action)
         half = output.shape[-1] // 2
@@ -124,7 +167,7 @@ class DynamicsNet(Model):
         logvar = max_logvar - jax.nn.softplus(max_logvar - raw_logvar)
         logvar = min_logvar + jax.nn.softplus(logvar - min_logvar)
 
-        return mean, logvar
+        return mean, logvar, max_logvar, min_logvar
 
 
 # ── PolicyNet ──────────────────────────────────────────────────────────────────
@@ -152,6 +195,7 @@ class PolicyNet(Model):
         use_bias: bool = True,
         activation: str = "relu",
         dtype: str = "float32",
+        init_scheme: str = "eggroll",
     ) -> CommonInit:
         """Initialise PolicyNet parameters.
 
@@ -159,7 +203,16 @@ class PolicyNet(Model):
         only one sub-module. ``common_params.params`` in ``_forward`` is therefore
         the MLP's layer dict directly.
         """
-        return MLP.rand_init(key, obs_dim, act_dim, hidden_dims, use_bias, activation, dtype)
+        return MLP.rand_init(
+            key,
+            obs_dim,
+            act_dim,
+            hidden_dims,
+            use_bias,
+            activation,
+            dtype,
+            init_scheme=init_scheme,
+        )
 
     @classmethod
     def _forward(

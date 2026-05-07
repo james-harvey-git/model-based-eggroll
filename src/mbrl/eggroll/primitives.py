@@ -18,6 +18,7 @@ from collections import defaultdict
 from functools import partial
 from typing import Any, NamedTuple
 
+from flax.linen.linear import default_kernel_init
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten, tree_unflatten
@@ -415,17 +416,45 @@ class Embedding(Model):
 
 # ── Compound primitives ────────────────────────────────────────────────────────
 
+
+def _linear_weight_init(key, in_dim, out_dim, dtype, init_scheme):
+    if init_scheme == "eggroll":
+        scale = 1 / jnp.sqrt(in_dim)
+        return (jax.random.normal(key, (out_dim, in_dim)) * scale).astype(dtype=dtype)
+    if init_scheme == "flax_dense":
+        # Flax Dense stores kernels as (in_dim, out_dim); MM stores them transposed.
+        return default_kernel_init(key, (in_dim, out_dim), dtype).T.astype(dtype=dtype)
+    raise ValueError(
+        f"Unsupported linear init scheme '{init_scheme}'. Expected one of: eggroll, flax_dense."
+    )
+
 class Linear(Model):
     @classmethod
-    def rand_init(cls, key, in_dim, out_dim, use_bias, dtype, *args, **kwargs):
+    def rand_init(
+        cls,
+        key,
+        in_dim,
+        out_dim,
+        use_bias,
+        dtype,
+        init_scheme="eggroll",
+        *args,
+        **kwargs,
+    ):
+        weight = CommonInit(
+            None,
+            _linear_weight_init(key, in_dim, out_dim, dtype, init_scheme),
+            (),
+            MM_PARAM,
+        )
         if use_bias:
             return merge_inits(
-                weight=MM.rand_init(key, in_dim, out_dim, dtype),
+                weight=weight,
                 bias=Parameter.rand_init(key, None, None, jnp.zeros(out_dim, dtype=dtype), dtype),
             )
         else:
             return merge_inits(
-                weight=MM.rand_init(key, in_dim, out_dim, dtype),
+                weight=weight,
             )
 
     @classmethod
@@ -438,13 +467,37 @@ class Linear(Model):
 
 class MLP(Model):
     @classmethod
-    def rand_init(cls, key, in_dim, out_dim, hidden_dims, use_bias, activation, dtype, *args, **kwargs):
+    def rand_init(
+        cls,
+        key,
+        in_dim,
+        out_dim,
+        hidden_dims,
+        use_bias,
+        activation,
+        dtype,
+        init_scheme="eggroll",
+        *args,
+        **kwargs,
+    ):
         input_dims = [in_dim] + list(hidden_dims)
         output_dims = list(hidden_dims) + [out_dim]
 
         all_keys = jax.random.split(key, len(input_dims))
 
-        merged_params = merge_inits(**{str(t): Linear.rand_init(all_keys[t], input_dims[t], output_dims[t], use_bias, dtype) for t in range(len(input_dims))})
+        merged_params = merge_inits(
+            **{
+                str(t): Linear.rand_init(
+                    all_keys[t],
+                    input_dims[t],
+                    output_dims[t],
+                    use_bias,
+                    dtype,
+                    init_scheme=init_scheme,
+                )
+                for t in range(len(input_dims))
+            }
+        )
         return merge_frozen(merged_params, activation=activation)
 
     @classmethod

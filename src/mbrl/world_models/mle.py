@@ -86,6 +86,19 @@ class EnsembleDynamicsModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+def _mle_work_counters(
+    epoch: int,
+    train_examples_per_epoch: int,
+    forward_evals_per_epoch: int,
+    init_forward_evals: int,
+) -> tuple[int, int]:
+    """Compute cumulative work counters (keyed on completed epochs) as Python ints."""
+    return (
+        train_examples_per_epoch * epoch,
+        init_forward_evals + forward_evals_per_epoch * epoch,
+    )
+
+
 def _train_dynamics(
     train_state, cfg, train_inputs, train_targets, val_inputs, val_targets, rng, log_fn=None
 ):
@@ -96,6 +109,14 @@ def _train_dynamics(
     num_elites = cfg.num_elites
     batch_size = cfg.batch_size
     logvar_diff_coef = cfg.logvar_diff_coef
+    num_ensemble = cfg.num_ensemble
+    batches_per_epoch = train_inputs.shape[0] // batch_size
+    train_examples_per_epoch = batches_per_epoch * batch_size
+    val_examples_per_epoch = (val_inputs.shape[0] // batch_size) * batch_size
+    if val_examples_per_epoch == 0:
+        val_examples_per_epoch = val_inputs.shape[0]
+    forward_evals_per_epoch = (train_examples_per_epoch + val_examples_per_epoch) * num_ensemble
+    init_forward_evals = val_examples_per_epoch * num_ensemble
 
     def _train_step(train_state, batch):
         inputs, targets = batch
@@ -143,7 +164,32 @@ def _train_dynamics(
         elite_idxs = val_mse_per_member.argsort()[:num_elites]
 
         if log_fn is not None:
-            jax.debug.callback(log_fn, epoch, batch_losses.mean(), val_mse_per_member.mean())
+            _log_fn = log_fn
+
+            def _log_callback(epoch_i, train_loss_i, val_mse_i) -> None:
+                epoch_py = int(epoch_i) + 1
+                update_step = epoch_py * batches_per_epoch
+                transitions_seen, forward_evals = _mle_work_counters(
+                    epoch_py,
+                    train_examples_per_epoch,
+                    forward_evals_per_epoch,
+                    init_forward_evals,
+                )
+                _log_fn(
+                    update_step,
+                    float(train_loss_i),
+                    float(val_mse_i),
+                    transitions_seen,
+                    forward_evals,
+                    epoch=epoch_py,
+                )
+
+            jax.debug.callback(
+                _log_callback,
+                epoch,
+                batch_losses.mean(),
+                val_mse_per_member.mean(),
+            )
 
         return rng, train_state, elite_idxs
 
@@ -244,6 +290,26 @@ class MLEEnsemble(EnsembleDynamics):
             params=params,
             tx=optax.adamw(cfg.lr, eps=1e-5, weight_decay=cfg.weight_decay),
         )
+
+        if log_fn is not None:
+            n_eval = (val_inputs.shape[0] // cfg.batch_size) * cfg.batch_size
+            if n_eval == 0:
+                n_eval = val_inputs.shape[0]
+            init_eval_inputs = val_inputs[:n_eval]
+            init_eval_targets = val_targets[:n_eval]
+            mean_predictions, _ = train_state.apply_fn(train_state.params, init_eval_inputs)
+            init_val_mse = jnp.mean(
+                ((mean_predictions - init_eval_targets) ** 2),
+                axis=(1, 2),
+            ).mean()
+            log_fn(
+                0,
+                float("nan"),
+                float(init_val_mse),
+                0,
+                n_eval * cfg.num_ensemble,
+                epoch=0,
+            )
 
         # Train
         rng, train_rng = jax.random.split(rng)
