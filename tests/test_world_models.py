@@ -900,6 +900,35 @@ class TestHybridHandoff:
         # logged step is one prompt batch, not offset * batch_size.
         assert log_calls[0]["transitions_seen"] < offset
 
+    def test_end_to_end_smoke(self, synthetic_dataset, stage1_checkpoint):
+        """Full Stage 1 → checkpoint → Stage 2 finetune → step() + predict_ensemble()."""
+        ckpt_path, _, _ = stage1_checkpoint
+        cfg = OmegaConf.create(
+            {
+                **OmegaConf.to_container(HYBRID_EGGROLL_CFG),  # type: ignore[arg-type]
+                "init_checkpoint": str(ckpt_path),
+                "num_epochs": 3,
+            }
+        )
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        model.train(synthetic_dataset, cfg, jax.random.key(20))
+
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+
+        next_obs, reward, done = model.step(obs, action, jax.random.key(21))
+        assert next_obs.shape == (OBS_DIM,)
+        assert reward.shape == ()
+        assert done.shape == ()
+        assert jnp.all(jnp.isfinite(next_obs))
+        assert jnp.isfinite(reward)
+
+        means, stds = model.predict_ensemble(obs, action)
+        assert means.shape == (NUM_EGGROLL_MEMBERS, OBS_DIM + 1)
+        assert stds.shape == (NUM_EGGROLL_MEMBERS, OBS_DIM + 1)
+        assert jnp.all(jnp.isfinite(means))
+        assert jnp.all(jnp.isfinite(stds))
+
     def test_obs_act_dim_mismatch_errors(self, synthetic_dataset, stage1_checkpoint, tmp_path):
         """`experiments.world_model.run` rejects a checkpoint with wrong obs/act dims."""
         _, ckpt, _ = stage1_checkpoint

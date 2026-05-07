@@ -201,6 +201,21 @@ class EGGROLLEnsemble(EnsembleDynamics):
         MSE is logged after the first update at step 1 plus every
         ``full_validation_interval`` steps thereafter via ``jax.lax.cond`` +
         ``jax.debug.callback`` when ``log_fn`` is provided.
+
+        Warm-start (issue #30): when ``cfg.init_checkpoint`` is set to a
+        stage-1 ``MLEDynamicsNet`` checkpoint, this method
+        - splices the loaded params (and, when ``cfg.reset_optax_state`` is
+          ``False``, the AdamW state) into the freshly-initialised EGGROLL
+          state instead of using random init;
+        - replays stage 1's ``jax.random.split(rng, 3)`` chain off the
+          checkpoint's ``seed`` so ``train_val_split`` recovers the same
+          held-out transitions stage 1 used for validation;
+        - suppresses the pre-training val-MSE log at step 0 (stage 1 already
+          recorded that boundary point);
+        - offsets the W&B step axis by ``ckpt["update_steps_completed"]`` so
+          the two runs stitch into a continuous x-axis. Work counters
+          (``transitions_seen``, ``forward_evals``) are NOT offset — they
+          measure local-this-run EGGROLL work.
         """
         group_size = int(cfg.eggroll.group_size)
         assert group_size >= 0, f"group_size must be non-negative (got {cfg.eggroll.group_size})"
