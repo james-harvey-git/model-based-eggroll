@@ -225,11 +225,14 @@ class EGGROLLEnsemble(EnsembleDynamics):
         init_ckpt_path = cfg.get("init_checkpoint", None)
         reset_optax = bool(cfg.get("reset_optax_state", False))
         ckpt: dict | None = None
+        step_offset: int = 0
         if init_ckpt_path is not None:
             import pickle
 
             with open(init_ckpt_path, "rb") as f:
                 ckpt = pickle.load(f)
+            assert ckpt is not None  # narrow for Pyright
+            step_offset = int(ckpt["update_steps_completed"])
 
         # Allocate all keys up front. When warm-starting, replay the stage-1
         # split chain (jax.random.split(rng, 3) on jax.random.key(seed)) so
@@ -389,16 +392,20 @@ class EGGROLLEnsemble(EnsembleDynamics):
                 should_full_validate = (epoch == 0) | (step % full_validation_interval == 0)
 
                 def _log_train_callback(step_i, train_loss_i) -> None:
-                    step_py = int(step_i)
+                    # `step_i` is the local-this-run step (epoch + 1). Work
+                    # counters measure this-run work and use it directly; the
+                    # W&B step axis is offset by stage-1 update_steps_completed
+                    # so the two runs stitch into a single x-axis.
+                    local_step = int(step_i)
                     transitions_seen, forward_evals = _eggroll_work_counters(
-                        step_py,
+                        local_step,
                         n_prompts,
                         pop,
                         n_val,
                         full_validation_interval,
                     )
                     _log_fn(
-                        step_py,
+                        local_step + step_offset,
                         float(train_loss_i),
                         float("nan"),
                         transitions_seen,
@@ -413,16 +420,16 @@ class EGGROLLEnsemble(EnsembleDynamics):
                     )
 
                 def _log_val_callback(step_i, train_loss_i, val_mse_i) -> None:
-                    step_py = int(step_i)
+                    local_step = int(step_i)
                     transitions_seen, forward_evals = _eggroll_work_counters(
-                        step_py,
+                        local_step,
                         n_prompts,
                         pop,
                         n_val,
                         full_validation_interval,
                     )
                     _log_fn(
-                        step_py,
+                        local_step + step_offset,
                         float(train_loss_i),
                         float(val_mse_i),
                         transitions_seen,

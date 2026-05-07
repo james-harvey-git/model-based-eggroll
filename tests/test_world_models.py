@@ -850,6 +850,56 @@ class TestHybridHandoff:
             with pytest.raises(ValueError, match="dataset_id mismatch"):
                 world_model_exp.run(run_cfg, logger)
 
+    def test_update_step_offset(self, synthetic_dataset, stage1_checkpoint):
+        """Stage 2 logs at update_step >= update_steps_completed + 1.
+
+        Also confirms the init val-MSE row at step 0 is suppressed (stage 1
+        already covered that boundary point) and that work counters
+        (transitions_seen, forward_evals) reset per run rather than carrying
+        the stage-1 values forward.
+        """
+        ckpt_path, ckpt, _ = stage1_checkpoint
+        cfg = OmegaConf.create(
+            {
+                **OmegaConf.to_container(HYBRID_EGGROLL_CFG),  # type: ignore[arg-type]
+                "init_checkpoint": str(ckpt_path),
+                "num_epochs": 3,
+                "log_interval": 1,
+                "full_validation_interval": 1,
+            }
+        )
+
+        log_calls: list[dict] = []
+
+        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals):
+            log_calls.append(
+                {
+                    "step": int(step),
+                    "train_loss": float(train_loss),
+                    "val_mse": float(val_mse),
+                    "transitions_seen": int(transitions_seen),
+                    "forward_evals": int(forward_evals),
+                }
+            )
+
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        model.train(synthetic_dataset, cfg, jax.random.key(11), log_fn=log_fn)
+        jax.effects_barrier()
+
+        offset = int(ckpt["update_steps_completed"])
+        assert offset > 0  # sanity: stage 1 actually trained
+
+        assert log_calls, "stage 2 should produce at least one log row"
+        # No row at step 0 — init val-MSE log is suppressed when warm-starting.
+        assert all(c["step"] > offset for c in log_calls), (
+            f"all stage-2 rows must sit at update_step > offset={offset}, "
+            f"got {[c['step'] for c in log_calls]}"
+        )
+        assert log_calls[0]["step"] == offset + 1
+        # Work counters reset per run: stage-2 transitions_seen at the first
+        # logged step is one prompt batch, not offset * batch_size.
+        assert log_calls[0]["transitions_seen"] < offset
+
     def test_obs_act_dim_mismatch_errors(self, synthetic_dataset, stage1_checkpoint, tmp_path):
         """`experiments.world_model.run` rejects a checkpoint with wrong obs/act dims."""
         _, ckpt, _ = stage1_checkpoint
