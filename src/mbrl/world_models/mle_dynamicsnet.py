@@ -233,11 +233,18 @@ class MLEDynamicsNet(EnsembleDynamics):
 
         def _loss_fn(params, inputs, targets):
             obs_b, action_b = inputs[..., : self.obs_dim], inputs[..., self.obs_dim :]
-            mean, logvar, max_logvar, min_logvar = jax.vmap(
+            mean, logvar, _, _ = jax.vmap(
                 lambda o, a: self._unperturbed_forward(params, o, a), in_axes=(0, 0)
             )(obs_b, action_b)
             mse_loss = jnp.mean((targets - mean) ** 2 * jnp.exp(-logvar))
             var_loss = jnp.mean(logvar)
+            # Use the unbroadcast (D,)-shaped parameters directly (matching
+            # MLEEnsemble at mle.py:131-132). Going via the vmapped forward
+            # returns max/min_logvar with a batch axis, which would scale this
+            # penalty by batch_size and (paradoxically) collapse max and min
+            # together to large negative values — see GitHub PR #31 discussion.
+            max_logvar = params["max_logvar"]
+            min_logvar = params["min_logvar"]
             logvar_diff = jnp.sum(max_logvar - min_logvar)
             loss = mse_loss + var_loss + logvar_diff_coef * logvar_diff
             return loss
