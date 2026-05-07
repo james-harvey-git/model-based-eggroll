@@ -27,6 +27,24 @@ def run(cfg: DictConfig, logger: Logger) -> None:
 
     dataset, info = load_dataset(cfg.dataset.name)
 
+    # When warm-starting EGGROLL from a stage-1 checkpoint, sanity-check that
+    # we're finetuning on the dataset the checkpoint was pretrained on.
+    init_ckpt_path = cfg.world_model.get("init_checkpoint", None)
+    if init_ckpt_path is not None:
+        with open(init_ckpt_path, "rb") as f:
+            _ckpt_meta = pickle.load(f)
+        if _ckpt_meta["dataset_id"] != info.dataset_id:
+            raise ValueError(
+                f"init_checkpoint dataset_id mismatch: ckpt={_ckpt_meta['dataset_id']!r} "
+                f"vs current dataset={info.dataset_id!r}. Refusing to finetune on a "
+                "different dataset to the one used for pretraining."
+            )
+        if _ckpt_meta["obs_dim"] != info.obs_dim or _ckpt_meta["act_dim"] != info.act_dim:
+            raise ValueError(
+                f"init_checkpoint shape mismatch: ckpt obs/act=({_ckpt_meta['obs_dim']},"
+                f" {_ckpt_meta['act_dim']}) vs dataset=({info.obs_dim}, {info.act_dim})."
+            )
+
     # Plumb the top-level seed into cfg.world_model so per-class trainers that
     # need a deterministic seed (e.g. MLEDynamicsNet, which records it in the
     # checkpoint so Stage 2 can replay the train/val split) can read it from

@@ -218,11 +218,35 @@ class EGGROLLEnsemble(EnsembleDynamics):
             f"(got {full_validation_interval})"
         )
 
-        # Allocate all keys up front
-        rng, split_rng, init_rng, es_rng = jax.random.split(rng, 4)
+        # Optional warm-start from a stage-1 MLEDynamicsNet checkpoint (issue #30).
+        # When set, params (and optionally the AdamW state) are loaded after
+        # init_eggroll_state below, and the train/val partition is replayed from
+        # the checkpoint's seed + validation_split.
+        init_ckpt_path = cfg.get("init_checkpoint", None)
+        reset_optax = bool(cfg.get("reset_optax_state", False))
+        ckpt: dict | None = None
+        if init_ckpt_path is not None:
+            import pickle
+
+            with open(init_ckpt_path, "rb") as f:
+                ckpt = pickle.load(f)
+
+        # Allocate all keys up front. When warm-starting, replay the stage-1
+        # split chain (jax.random.split(rng, 3) on jax.random.key(seed)) so
+        # `split_rng` recovers the same train/val partition as stage 1. DO NOT
+        # REORDER — see MLEDynamicsNet.train and tests/test_world_models.py
+        # ::TestHybridHandoff::test_val_set_parity.
+        if ckpt is not None:
+            stage1_root = jax.random.key(int(ckpt["seed"]))
+            _, split_rng, _ = jax.random.split(stage1_root, 3)
+            val_split = float(ckpt["validation_split"])
+            rng, init_rng, es_rng = jax.random.split(rng, 3)
+        else:
+            rng, split_rng, init_rng, es_rng = jax.random.split(rng, 4)
+            val_split = float(cfg.validation_split)
 
         # Split into train / val partitions
-        train_data, val_data = train_val_split(dataset, cfg.validation_split, split_rng)
+        train_data, val_data = train_val_split(dataset, val_split, split_rng)
 
         # Targets: (delta_obs, reward) — matches DynamicsNet output convention
         def _targets(data: Transition) -> jnp.ndarray:
@@ -261,7 +285,25 @@ class EGGROLLEnsemble(EnsembleDynamics):
             use_batched_update=bool(cfg.eggroll.get("use_batched_update", False)),
         )
 
-        if log_fn is not None:
+        # Splice the stage-1 params (and optionally the AdamW state) into the
+        # freshly-initialised EGGROLL state. `init_eggroll_state` has already
+        # built an `opt_state` of the matching shape against `common_init.params`;
+        # we just overwrite the values when `reset_optax_state` is False.
+        if ckpt is not None:
+            assert jax.tree.structure(state.params) == jax.tree.structure(ckpt["params"]), (
+                "init_checkpoint params pytree structure does not match the configured "
+                "DynamicsNet — check hidden_dims / activation / init_scheme match between "
+                "stage-1 and stage-2 cfgs."
+            )
+            state = state._replace(params=ckpt["params"])
+            if not reset_optax:
+                state = state._replace(
+                    noiser_params={**state.noiser_params, "opt_state": ckpt["opt_state"]}
+                )
+
+        # Skip the pre-training val-MSE log when warm-starting: stage 1 already
+        # logged that boundary point at its own final update_step.
+        if log_fn is not None and ckpt is None:
             init_val_means, _ = jax.vmap(
                 lambda o, a: DynamicsNet.forward(
                     EggRoll,
