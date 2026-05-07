@@ -11,6 +11,7 @@ import pytest
 from mbrl.data import Transition
 from mbrl.world_models.eggroll import EGGROLLEnsemble, _eggroll_work_counters
 from mbrl.world_models.mle import EnsembleDynamicsModel, MLEEnsemble
+from mbrl.world_models.mle_dynamicsnet import MLEDynamicsNet
 from mbrl.world_models.termination_fns import (
     get_termination_fn,
     termination_fn_halfcheetah,
@@ -490,3 +491,159 @@ class TestEGGROLLEnsembleCheckpoint:
         means_b, stds_b = reloaded.predict_ensemble(obs, action)
         assert jnp.allclose(means_a, means_b)
         assert jnp.allclose(stds_a, stds_b)
+
+
+# ---------------------------------------------------------------------------
+# MLEDynamicsNet tests
+# ---------------------------------------------------------------------------
+
+NUM_MLE_DYN_MEMBERS = 1
+
+MLE_DYN_FAST_CFG = OmegaConf.create(
+    {
+        "hidden_dims": [8, 8],
+        "activation": "relu",
+        "init_scheme": "eggroll",
+        "num_epochs": 5,
+        "batch_size": 32,
+        "lr": 1e-3,
+        "weight_decay": 1e-5,
+        "validation_split": 0.2,
+        "logvar_diff_coef": 0.01,
+        "max_logvar_init": 0.5,
+        "min_logvar_init": -10.0,
+        "num_members": NUM_MLE_DYN_MEMBERS,
+        "seed": 0,
+    }
+)
+
+
+@pytest.fixture(scope="module")
+def mle_dyn_trained(synthetic_dataset):
+    model = MLEDynamicsNet(
+        OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", MLE_DYN_FAST_CFG
+    )
+    model.train(synthetic_dataset, MLE_DYN_FAST_CFG, jax.random.key(0))
+    return model
+
+
+class TestMLEDynamicsNet:
+    def test_train_completes(self, synthetic_dataset):
+        model = MLEDynamicsNet(
+            OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", MLE_DYN_FAST_CFG
+        )
+        model.train(synthetic_dataset, MLE_DYN_FAST_CFG, jax.random.key(42))
+        assert model._params is not None
+        assert model._opt_state is not None
+        assert model._update_steps_completed > 0
+        assert model._validation_split == MLE_DYN_FAST_CFG.validation_split
+        assert model._seed == MLE_DYN_FAST_CFG.seed
+
+    def test_train_calls_log_fn(self, synthetic_dataset):
+        model = MLEDynamicsNet(
+            OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", MLE_DYN_FAST_CFG
+        )
+        log_calls: list[dict] = []
+
+        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals, epoch=None):
+            log_calls.append(
+                {
+                    "step": int(step),
+                    "epoch": None if epoch is None else int(epoch),
+                    "train_loss": float(train_loss),
+                    "val_mse": float(val_mse),
+                    "transitions_seen": int(transitions_seen),
+                    "forward_evals": int(forward_evals),
+                }
+            )
+
+        model.train(synthetic_dataset, MLE_DYN_FAST_CFG, jax.random.key(42), log_fn=log_fn)
+        jax.effects_barrier()
+
+        n_train = int((1 - MLE_DYN_FAST_CFG.validation_split) * N)
+        batches_per_epoch = n_train // MLE_DYN_FAST_CFG.batch_size
+
+        assert len(log_calls) == MLE_DYN_FAST_CFG.num_epochs + 1
+        assert [c["epoch"] for c in log_calls] == list(range(MLE_DYN_FAST_CFG.num_epochs + 1))
+        assert [c["step"] for c in log_calls] == [
+            epoch * batches_per_epoch for epoch in range(MLE_DYN_FAST_CFG.num_epochs + 1)
+        ]
+        assert np.isnan(log_calls[0]["train_loss"])
+        assert all(np.isfinite(c["val_mse"]) for c in log_calls)
+
+    def test_loss_decreases(self, synthetic_dataset):
+        # Use a longer-than-fast config so any noise in the smoke run averages out.
+        cfg = OmegaConf.create(
+            {**OmegaConf.to_container(MLE_DYN_FAST_CFG), "num_epochs": 30}  # type: ignore[arg-type]
+        )
+        model = MLEDynamicsNet(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        train_losses: list[float] = []
+
+        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals, epoch=None):
+            tl = float(train_loss)
+            if np.isfinite(tl):
+                train_losses.append(tl)
+
+        model.train(synthetic_dataset, cfg, jax.random.key(0), log_fn=log_fn)
+        jax.effects_barrier()
+
+        assert len(train_losses) >= 4
+        first_two = sum(train_losses[:2]) / 2
+        last_two = sum(train_losses[-2:]) / 2
+        assert last_two < first_two
+
+    def test_step_shapes(self, mle_dyn_trained):
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        next_obs, reward, done = mle_dyn_trained.step(obs, action, jax.random.key(0))
+        assert next_obs.shape == (OBS_DIM,)
+        assert reward.shape == ()
+        assert done.shape == ()
+
+    def test_predict_ensemble_shape(self, mle_dyn_trained):
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        means, stds = mle_dyn_trained.predict_ensemble(obs, action)
+        assert means.shape == (NUM_MLE_DYN_MEMBERS, OBS_DIM + 1)
+        assert stds.shape == (NUM_MLE_DYN_MEMBERS, OBS_DIM + 1)
+        assert jnp.all(jnp.isfinite(means))
+        assert jnp.all(jnp.isfinite(stds))
+
+    def test_determinism(self, synthetic_dataset):
+        model_a = MLEDynamicsNet(
+            OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", MLE_DYN_FAST_CFG
+        )
+        model_b = MLEDynamicsNet(
+            OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", MLE_DYN_FAST_CFG
+        )
+        model_a.train(synthetic_dataset, MLE_DYN_FAST_CFG, jax.random.key(123))
+        model_b.train(synthetic_dataset, MLE_DYN_FAST_CFG, jax.random.key(123))
+        leaves_a = jax.tree.leaves(model_a._params)
+        leaves_b = jax.tree.leaves(model_b._params)
+        assert len(leaves_a) == len(leaves_b)
+        for a, b in zip(leaves_a, leaves_b):
+            assert jnp.array_equal(a, b)
+
+    def test_checkpoint_roundtrip(self, mle_dyn_trained, tmp_path):
+        checkpoint = {
+            **mle_dyn_trained.checkpoint_state(),
+            "obs_dim": OBS_DIM,
+            "act_dim": ACT_DIM,
+            "dataset_id": "mujoco/halfcheetah/medium-v0",
+            "world_model_cfg": OmegaConf.to_container(MLE_DYN_FAST_CFG),
+            "wm_group": "test-group",
+        }
+        checkpoint_path = tmp_path / "world_model.pkl"
+        with open(checkpoint_path, "wb") as f:
+            pickle.dump(checkpoint, f)
+
+        reloaded = MLEDynamicsNet.load_from_checkpoint(checkpoint_path)
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        means_a, stds_a = mle_dyn_trained.predict_ensemble(obs, action)
+        means_b, stds_b = reloaded.predict_ensemble(obs, action)
+        assert jnp.allclose(means_a, means_b)
+        assert jnp.allclose(stds_a, stds_b)
+        assert reloaded._update_steps_completed == mle_dyn_trained._update_steps_completed
+        assert reloaded._validation_split == mle_dyn_trained._validation_split
+        assert reloaded._seed == mle_dyn_trained._seed
