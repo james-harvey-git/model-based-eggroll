@@ -13,6 +13,7 @@ from mbrl.data import load_dataset
 from mbrl.logger import Logger
 from mbrl.world_models.eggroll import EGGROLLEnsemble
 from mbrl.world_models.mle import MLEEnsemble
+from mbrl.world_models.mle_dynamicsnet import MLEDynamicsNet
 
 
 def run(cfg: DictConfig, logger: Logger) -> None:
@@ -26,13 +27,22 @@ def run(cfg: DictConfig, logger: Logger) -> None:
 
     dataset, info = load_dataset(cfg.dataset.name)
 
+    # Plumb the top-level seed into cfg.world_model so per-class trainers that
+    # need a deterministic seed (e.g. MLEDynamicsNet, which records it in the
+    # checkpoint so Stage 2 can replay the train/val split) can read it from
+    # their own cfg without an extra constructor argument.
+    if "seed" in cfg.world_model and cfg.world_model.seed is None:
+        OmegaConf.set_struct(cfg.world_model, False)
+        cfg.world_model.seed = int(cfg.seed)
+        OmegaConf.set_struct(cfg.world_model, True)
+
     wm_cls = get_class(cfg.world_model._target_)
     world_model = wm_cls(info.obs_dim, info.act_dim, info.dataset_id, cfg.world_model)
     start_time = time.perf_counter()
 
     # Normalize the x-axis to update-step count (1 update per epoch for EGGROLL;
     # batches_per_epoch updates per epoch for MLE).
-    if isinstance(world_model, MLEEnsemble):
+    if isinstance(world_model, (MLEEnsemble, MLEDynamicsNet)):
         n_train = int((1 - cfg.world_model.validation_split) * dataset.obs.shape[0])
         updates_per_epoch = max(n_train // cfg.world_model.batch_size, 1)
     else:
@@ -78,6 +88,8 @@ def run(cfg: DictConfig, logger: Logger) -> None:
             "params": world_model.params,
             "num_elites": world_model.num_elites,
         }
+    elif isinstance(world_model, MLEDynamicsNet):
+        checkpoint = {**common, **world_model.checkpoint_state()}
     else:
         assert isinstance(world_model, EGGROLLEnsemble)
         checkpoint = {
