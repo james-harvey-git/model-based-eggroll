@@ -1,0 +1,71 @@
+# EGGROLL finetune sweep over (sigma, sigma_decay_rate, lr).
+#
+# Starts every trial from the same stage-1 MLEDynamicsNet checkpoint
+# (`init_checkpoint` below) so the only variation across trials is the
+# three swept EGGROLL HPs. AdamW state is carried over from the
+# pretrain run (reset_optax_state=false) — empirically this helps
+# convergence in the finetune regime.
+#
+# Initial ranges informed by empirical exploration on halfcheetah-medium:
+#   sigma=0.01 with lr=1e-5  → too large, val MSE regressed.
+#   sigma=5e-4 with lr=1e-5  → too small, converged immediately to a
+#                              plateau and learned little new.
+# So the swept window brackets the gap between those two regimes.
+# Adjust the ranges below if your empirical sweet spot is different.
+#
+# Architecture/budget constants match the user's reference finetune
+# command (population_size=4096, group_size=16, activation=pqn,
+# full_validation_interval=1000, num_epochs=1175000 = 1.25M total
+# update steps after the stage-1 75k).
+#
+# Usage:
+#   uv run python scripts/init_sweep.py configs/sweep/eggroll_wm_halfcheetah_finetune.yaml
+#   RUNS_PER_GPU=12 SWEEP_ID=<id> sbatch --array=0-3 scripts/run_eggroll_wm_finetune_sweep_eit.slurm
+
+program: scripts/sweep_world_model.py
+method: random
+run_cap: 48
+metric:
+  name: world_model/val_mse
+  goal: minimize
+early_terminate:
+  type: hyperband
+  min_iter: 100000
+  eta: 3
+  s: 2
+parameters:
+  # ── Fixed architecture / batching / budget ───────────────────────────────────
+  population_size:
+    value: 4096
+  group_size:
+    value: 16
+  weight_decay:
+    value: 1e-5
+  b1:
+    value: 0.9
+  num_epochs:
+    value: 1175000
+  full_validation_interval:
+    value: 1000
+  activation:
+    value: pqn
+
+  # ── Warm-start from stage-1 MLE pretrain ────────────────────────────────────
+  init_checkpoint:
+    value: checkpoints/halfcheetah_medium_mle_pretrain/mledynamicsnet-halfcheetah-medium-s0-20260508-113811/world_model.pkl
+  reset_optax_state:
+    value: false
+
+  # ── Swept HPs ───────────────────────────────────────────────────────────────
+  sigma:
+    distribution: log_uniform_values
+    min: 5.0e-4
+    max: 5.0e-3
+  one_minus_sigma_decay_rate:
+    distribution: log_uniform_values
+    min: 1.0e-8
+    max: 1.0e-5
+  lr:
+    distribution: log_uniform_values
+    min: 1.0e-6
+    max: 1.0e-4

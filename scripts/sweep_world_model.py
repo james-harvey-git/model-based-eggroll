@@ -59,6 +59,10 @@ def compose_config(overrides: dict | None = None) -> DictConfig:
             "sigma_decay_rate": "world_model.eggroll.sigma_decay_rate",
             "lr": "world_model.eggroll.lr",
             "num_epochs": "world_model.num_epochs",
+            "full_validation_interval": "world_model.full_validation_interval",
+            "activation": "world_model.activation",
+            "init_checkpoint": "world_model.init_checkpoint",
+            "reset_optax_state": "world_model.reset_optax_state",
         }
         for key, path in mapping.items():
             if key in overrides:
