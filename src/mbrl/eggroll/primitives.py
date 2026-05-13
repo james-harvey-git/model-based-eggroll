@@ -148,9 +148,17 @@ def _noop_update(base_sigma, param, key, scores, iterinfo, frozen_noiser_params)
 
 class EggRoll(Noiser):
     @classmethod
-    def init_noiser(cls, params, sigma, lr, *args, solver=None, solver_kwargs=None, group_size=0, freeze_nonlora=False, noise_reuse=0, rank=1, use_batched_update: bool = False, **kwargs):
+    def init_noiser(cls, params, sigma, lr, *args, solver=None, solver_kwargs=None, group_size=0, freeze_nonlora=False, noise_reuse=0, rank=1, use_batched_update: bool = False, decay_tree=None, **kwargs):
         """
-        Return frozen_noiser_params and noiser_params
+        Return frozen_noiser_params and noiser_params.
+
+        ``sigma`` may be either a scalar (uniform across all params, backward
+        compat) or a pytree mirroring ``params`` (per-leaf sigma — see issue
+        #32). Scalars are splatted into a uniform tree at init time.
+
+        ``decay_tree`` is an optional per-leaf decay-rate pytree mirroring
+        ``params``. When provided it is stored in ``frozen_noiser_params``
+        under ``"sigma_decay_rate"`` for the caller's decay step to consume.
         """
         if solver is None:
             solver = optax.sgd
@@ -159,7 +167,19 @@ class EggRoll(Noiser):
         true_solver = solver(lr, **solver_kwargs)
         opt_state = true_solver.init(params)
 
-        return {"group_size": group_size, "freeze_nonlora": freeze_nonlora, "noise_reuse": noise_reuse, "solver": true_solver, "rank": rank, "use_batched_update": use_batched_update}, {"sigma": sigma, "opt_state": opt_state}
+        # Splat scalar sigma into a per-leaf tree; pytree sigma is used as-is.
+        if jax.tree.structure(sigma).num_leaves == 1:
+            sigma_tree = jax.tree.map(lambda _: jnp.asarray(sigma, dtype=jnp.float32), params)
+        else:
+            assert jax.tree.structure(sigma) == jax.tree.structure(params), (
+                "When sigma is a pytree, its structure must match params"
+            )
+            sigma_tree = sigma
+
+        frozen = {"group_size": group_size, "freeze_nonlora": freeze_nonlora, "noise_reuse": noise_reuse, "solver": true_solver, "rank": rank, "use_batched_update": use_batched_update}
+        if decay_tree is not None:
+            frozen["sigma_decay_rate"] = decay_tree
+        return frozen, {"sigma": sigma_tree, "opt_state": opt_state}
 
     @classmethod
     def do_mm(cls, frozen_noiser_params, noiser_params, param, base_key, iterinfo, x):
@@ -224,7 +244,12 @@ class EggRoll(Noiser):
 
     @classmethod
     def _do_updates_original(cls, frozen_noiser_params, noiser_params, params, base_keys, fitnesses, iterinfos, es_map):
-        new_grad = jax.tree.map(lambda p, k, m: cls._do_update(p, k, fitnesses, iterinfos, m, noiser_params["sigma"], frozen_noiser_params), params, base_keys, es_map)
+        # noiser_params["sigma"] is a pytree mirroring `params` post-#32; thread
+        # the per-leaf sigma alongside the existing tree.map.
+        new_grad = jax.tree.map(
+            lambda p, k, m, s: cls._do_update(p, k, fitnesses, iterinfos, m, s, frozen_noiser_params),
+            params, base_keys, es_map, noiser_params["sigma"],
+        )
         updates, noiser_params["opt_state"] = frozen_noiser_params["solver"].update(new_grad, noiser_params["opt_state"], params)
         return noiser_params, optax.apply_updates(params, updates)
 
@@ -234,10 +259,13 @@ class EggRoll(Noiser):
         avoiding a Python loop over every individual matrix. Makes XLA compilation
         significantly faster for large models.
         """
-        # Flatten all elements from the params, keys and map pytrees
+        # Flatten all elements from the params, keys, map and sigma pytrees.
+        # noiser_params["sigma"] mirrors `params` post-#32, so its flatten order
+        # aligns with flat_params and we can vmap over per-leaf sigma values.
         flat_params, treedef = tree_flatten(params)
         flat_keys, _ = tree_flatten(base_keys)
         flat_es, _ = tree_flatten(es_map)
+        flat_sigmas, _ = tree_flatten(noiser_params["sigma"])
 
         # Group param matrices based on (a) their shape and (b) which update fn (full or lora) they use
         buckets = defaultdict(list)
@@ -253,11 +281,12 @@ class EggRoll(Noiser):
             # makes arrays of shape (num_arrays_of_this_shape, w, h)
             batched_params = jnp.stack([flat_params[i] for i in indices])
             batched_keys = jnp.stack([flat_keys[i] for i in indices])
+            batched_sigmas = jnp.stack([flat_sigmas[i] for i in indices])
 
-            # we vmap only over the param and rng, and nothing else
+            # vmap over param, rng AND per-leaf sigma — sigma now varies within a bucket
             grads_for_this_batch = jax.vmap(
-                lambda param, rng: cls._do_update(param, rng, fitnesses, iterinfos, map_class, noiser_params["sigma"], frozen_noiser_params),
-            )(batched_params, batched_keys)
+                lambda param, rng, sigma: cls._do_update(param, rng, fitnesses, iterinfos, map_class, sigma, frozen_noiser_params),
+            )(batched_params, batched_keys, batched_sigmas)
 
             # Unstack back into the flat list
             for i, idx in enumerate(indices):
@@ -351,7 +380,16 @@ def merge_frozen(common, **kwargs):
 
 
 def call_submodule(cls, name, common_params, *args, **kwargs):
+    # When `noiser_params["sigma"]` is a per-leaf tree (EggRoll path post-#32),
+    # slice it alongside `params`/`frozen_params`/`es_tree_key`. When it isn't
+    # (base Noiser path, e.g. MLEDynamicsNet uses `noiser_params={}`), the
+    # guard falls through cleanly.
+    noiser_params = common_params.noiser_params
+    sigma = noiser_params.get("sigma") if isinstance(noiser_params, dict) else None
+    if isinstance(sigma, dict) and name in sigma:
+        noiser_params = {**noiser_params, "sigma": sigma[name]}
     sub_common_params = common_params._replace(
+        noiser_params=noiser_params,
         frozen_params=common_params.frozen_params[name] if common_params.frozen_params and name in common_params.frozen_params else None,
         params=common_params.params[name],
         es_tree_key=common_params.es_tree_key[name],

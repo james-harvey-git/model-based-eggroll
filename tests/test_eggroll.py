@@ -21,6 +21,7 @@ from mbrl.eggroll.networks import DynamicsNet, PolicyNet
 from mbrl.eggroll.primitives import LOGVAR_PARAM, MLP, MM_PARAM, PARAM, EggRoll, Linear
 from mbrl.eggroll.training import (
     EGGROLLState,
+    build_sigma_tree,
     eggroll_step,
     get_iterinfos,
     init_eggroll_state,
@@ -181,7 +182,11 @@ class TestInitEggrollState:
             use_bias=True, activation="relu", dtype="float32",
         )
         state = init_eggroll_state(common_init, es_key, sigma=0.05, lr=1e-3)
-        assert state.noiser_params["sigma"] == 0.05
+        # Post-#32: sigma is a per-leaf tree mirroring params; scalar input
+        # splats to a uniform tree (every leaf == 0.05).
+        for leaf in jax.tree.leaves(state.noiser_params["sigma"]):
+            assert jnp.allclose(leaf, 0.05)
+        assert jax.tree.structure(state.noiser_params["sigma"]) == jax.tree.structure(state.params)
 
     def test_accepts_nondefault_solver(self):
         model_key, es_key = jax.random.split(jax.random.key(3))
@@ -197,6 +202,39 @@ class TestInitEggrollState:
             solver=resolve_optax_solver("adam"),
         )
         assert state.noiser_params["opt_state"] is not None
+
+
+class TestBuildSigmaTree:
+    """build_sigma_tree dispatches per-leaf sigmas off es_map markers (#32)."""
+
+    def test_dispatches_on_es_map_markers(self):
+        # Construct a synthetic params/es_map with one leaf per relevant marker.
+        params = {
+            "lora_weight": jnp.zeros((3, 4)),
+            "nonlora_bias": jnp.zeros((4,)),
+            "max_logvar": jnp.zeros((4,)),
+        }
+        es_map = {
+            "lora_weight": MM_PARAM,
+            "nonlora_bias": PARAM,
+            "max_logvar": LOGVAR_PARAM,
+        }
+        groups = {"lora": 0.1, "nonlora": 0.01, "logvar": 0.001}
+        sigma_tree = build_sigma_tree(params, es_map, groups)
+        assert jnp.allclose(sigma_tree["lora_weight"], 0.1)
+        assert jnp.allclose(sigma_tree["nonlora_bias"], 0.01)
+        assert jnp.allclose(sigma_tree["max_logvar"], 0.001)
+
+    def test_structure_mirrors_params(self):
+        params = {"a": jnp.zeros(3), "b": {"c": jnp.zeros((2, 2))}}
+        es_map = {"a": PARAM, "b": {"c": MM_PARAM}}
+        groups = {"lora": 1.0, "nonlora": 2.0, "logvar": 3.0}
+        sigma_tree = build_sigma_tree(params, es_map, groups)
+        assert jax.tree.structure(sigma_tree) == jax.tree.structure(params)
+        # Leaves are scalar float32.
+        for leaf in jax.tree.leaves(sigma_tree):
+            assert leaf.shape == ()
+            assert leaf.dtype == jnp.float32
 
 
 class TestResolveOptaxSolver:
@@ -281,7 +319,10 @@ class TestEggrollStep:
         iterinfos = get_iterinfos(epoch=0, num_envs=num_envs)
         fitnesses = jnp.arange(num_envs, dtype=jnp.float32)
         new_state = eggroll_step(state, fitnesses, iterinfos)
-        assert new_state.noiser_params["sigma"] == sigma
+        # Post-#32: sigma is a per-leaf tree; assert every leaf still equals
+        # the requested sigma (eggroll_step does not decay).
+        for leaf in jax.tree.leaves(new_state.noiser_params["sigma"]):
+            assert jnp.allclose(leaf, sigma)
 
     def test_roundtrip_with_vmapped_forward(self):
         """Full cycle: init → get_iterinfos → vmapped forward → eggroll_step."""
@@ -455,6 +496,106 @@ class TestDynamicsNet:
         )(iterinfos, obs, action)
         assert mean.shape == (num_envs, _OBS_DIM + 1)
         assert logvar.shape == (num_envs, _OBS_DIM + 1)
+
+
+# ── Per-group sigma (#32) ──────────────────────────────────────────────────────
+
+
+class TestPerGroupSigma:
+    """End-to-end checks for per-leaf sigma plumbing on DynamicsNet (#32).
+
+    Uses DynamicsNet specifically because it's the only network in the repo
+    that emits LOGVAR_PARAM leaves alongside MM_PARAM and PARAM.
+    """
+
+    @staticmethod
+    def _make_dyn_state(key, sigma_groups):
+        """Build a DynamicsNet EGGROLLState with per-group sigmas."""
+        model_key, es_key = jax.random.split(key)
+        common_init = DynamicsNet.rand_init(
+            model_key, _OBS_DIM, _ACT_DIM, _HIDDEN,
+        )
+        sigma_tree = build_sigma_tree(
+            common_init.params, common_init.es_map, sigma_groups,
+        )
+        # Use SGD so update magnitudes are directly proportional to gradient
+        # magnitudes (Adam would normalise across the per-group scale).
+        return init_eggroll_state(
+            common_init, es_key, sigma=sigma_tree, lr=1e-2, solver=optax.sgd,
+        )
+
+    def test_logvar_sigma_zero_freezes_bounds(self):
+        """With sigma_logvar=0, max/min_logvar are byte-equal after a step."""
+        state = self._make_dyn_state(
+            jax.random.key(50),
+            sigma_groups={"lora": 0.1, "nonlora": 0.1, "logvar": 0.0},
+        )
+        num_envs = 8
+        iterinfos = get_iterinfos(epoch=0, num_envs=num_envs)
+        fitnesses = jnp.arange(num_envs, dtype=jnp.float32)
+        new_state = eggroll_step(state, fitnesses, iterinfos)
+
+        # Logvar bounds unchanged.
+        assert jnp.array_equal(
+            new_state.params["max_logvar"], state.params["max_logvar"]
+        )
+        assert jnp.array_equal(
+            new_state.params["min_logvar"], state.params["min_logvar"]
+        )
+
+        # Backbone leaves did change (sanity that the step ran nontrivially).
+        backbone_changed = any(
+            not jnp.array_equal(o, n)
+            for o, n in zip(
+                jax.tree.leaves(state.params["backbone"]),
+                jax.tree.leaves(new_state.params["backbone"]),
+            )
+        )
+        assert backbone_changed
+
+    def test_per_group_sigma_takes_effect(self):
+        """Update magnitudes follow the per-group sigma ordering (SGD).
+
+        With sigma_lora >> sigma_nonlora >> sigma_logvar (all non-zero), the
+        ES gradient estimate magnitude scales with sigma, and SGD's step does
+        too. Loose ordering check — allow for stochasticity by averaging the
+        L2 update magnitude per group across leaves.
+        """
+        state = self._make_dyn_state(
+            jax.random.key(51),
+            sigma_groups={"lora": 0.5, "nonlora": 0.05, "logvar": 0.005},
+        )
+        num_envs = 16
+        iterinfos = get_iterinfos(epoch=0, num_envs=num_envs)
+        fitnesses = jax.random.normal(jax.random.key(99), (num_envs,))
+        new_state = eggroll_step(state, fitnesses, iterinfos)
+
+        def avg_l2_delta(orig_tree, new_tree):
+            deltas = [
+                jnp.linalg.norm((n - o).ravel()) / jnp.sqrt(n.size)
+                for o, n in zip(jax.tree.leaves(orig_tree), jax.tree.leaves(new_tree))
+            ]
+            return float(jnp.mean(jnp.stack(deltas)))
+
+        # Bucket params by group via es_map. backbone "weight" leaves are MM_PARAM,
+        # backbone "bias" leaves are PARAM, max/min_logvar are LOGVAR_PARAM.
+        lora_orig = {k: v["weight"] for k, v in state.params["backbone"].items()}
+        lora_new = {k: v["weight"] for k, v in new_state.params["backbone"].items()}
+        nonlora_orig = {k: v["bias"] for k, v in state.params["backbone"].items()}
+        nonlora_new = {k: v["bias"] for k, v in new_state.params["backbone"].items()}
+        logvar_orig = {
+            "max": state.params["max_logvar"], "min": state.params["min_logvar"],
+        }
+        logvar_new = {
+            "max": new_state.params["max_logvar"], "min": new_state.params["min_logvar"],
+        }
+
+        lora_delta = avg_l2_delta(lora_orig, lora_new)
+        nonlora_delta = avg_l2_delta(nonlora_orig, nonlora_new)
+        logvar_delta = avg_l2_delta(logvar_orig, logvar_new)
+
+        # Strict ordering of average update magnitude.
+        assert lora_delta > nonlora_delta > logvar_delta > 0.0
 
 
 # ── PolicyNet ──────────────────────────────────────────────────────────────────

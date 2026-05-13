@@ -11,7 +11,46 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from mbrl.eggroll.primitives import CommonInit, EggRoll, simple_es_tree_key
+from mbrl.eggroll.primitives import (
+    LOGVAR_PARAM,
+    MM_PARAM,
+    CommonInit,
+    EggRoll,
+    simple_es_tree_key,
+)
+
+
+def build_sigma_tree(params: Any, es_map: Any, groups: dict[str, float]) -> Any:
+    """Build a pytree mirroring ``params`` with per-leaf scalar sigmas.
+
+    Per-leaf assignment dispatches on the leaf's ``es_map`` marker:
+      - ``MM_PARAM``     → ``groups["lora"]``
+      - ``LOGVAR_PARAM`` → ``groups["logvar"]``
+      - otherwise        → ``groups["nonlora"]``
+
+    Args:
+        params: A pytree of leaf arrays.
+        es_map: A pytree mirroring ``params`` with integer marker leaves.
+        groups: Dict with keys ``{"lora", "nonlora", "logvar"}`` mapping to
+            scalar sigma values.
+
+    Returns:
+        Pytree with the same structure as ``params`` where each leaf is a
+        ``jnp.float32`` scalar — the per-leaf sigma.
+    """
+    lora = jnp.float32(groups["lora"])
+    nonlora = jnp.float32(groups["nonlora"])
+    logvar = jnp.float32(groups["logvar"])
+
+    def assign(_leaf, marker):
+        m = int(marker)
+        if m == MM_PARAM:
+            return lora
+        if m == LOGVAR_PARAM:
+            return logvar
+        return nonlora
+
+    return jax.tree.map(assign, params, es_map)
 
 
 class EGGROLLState(NamedTuple):

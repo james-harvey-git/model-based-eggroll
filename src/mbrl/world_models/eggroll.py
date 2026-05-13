@@ -392,8 +392,12 @@ class EGGROLLEnsemble(EnsembleDynamics):
                 fnp, dict(noiser_params), params, etk, normalized, iterinfos, em
             )
 
-            # Functional sigma decay — no in-place mutation on the traced carry dict
-            noiser_params = {**noiser_params, "sigma": noiser_params["sigma"] * sigma_decay}
+            # Functional sigma decay over the per-leaf sigma tree (issue #32).
+            # `sigma_decay` is a scalar here; commit 5 swaps to a per-leaf decay tree.
+            noiser_params = {
+                **noiser_params,
+                "sigma": jax.tree.map(lambda s: s * sigma_decay, noiser_params["sigma"]),
+            }
 
             # Log train loss every log_interval and full-validation MSE after
             # the first training step (step 1) plus every
