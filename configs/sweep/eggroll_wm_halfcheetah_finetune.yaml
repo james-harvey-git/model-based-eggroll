@@ -1,17 +1,19 @@
-# EGGROLL finetune sweep over (sigma, sigma_decay_rate, lr).
+# EGGROLL finetune sweep over per-group sigmas and decay rates (#32).
 #
 # Starts every trial from the same stage-1 MLEDynamicsNet checkpoint
 # (`init_checkpoint` below) so the only variation across trials is the
-# three swept EGGROLL HPs. AdamW state is carried over from the
-# pretrain run (reset_optax_state=false) — empirically this helps
-# convergence in the finetune regime.
+# six swept HPs plus lr. AdamW state is carried over from the pretrain
+# run (reset_optax_state=false) — empirically this helps convergence in
+# the finetune regime.
 #
 # Initial ranges informed by empirical exploration on halfcheetah-medium:
 #   sigma=0.01 with lr=1e-5  → too large, val MSE regressed.
 #   sigma=5e-4 with lr=1e-5  → too small, converged immediately to a
 #                              plateau and learned little new.
-# So the swept window brackets the gap between those two regimes.
-# Adjust the ranges below if your empirical sweet spot is different.
+# So the swept window brackets the gap between those two regimes. Logvar
+# bounds live on a smaller scale (O(1)–O(10)) than weight matrices, so
+# their sigma range is one OOM smaller. Decay rates get separate per-group
+# windows since the right schedule depends on the absolute sigma.
 #
 # Architecture/budget constants match the user's reference finetune
 # command (population_size=4096, group_size=16, activation=pqn,
@@ -24,7 +26,7 @@
 
 program: scripts/sweep_world_model.py
 method: random
-run_cap: 48
+run_cap: 72
 metric:
   name: world_model/val_mse
   goal: minimize
@@ -56,15 +58,40 @@ parameters:
   reset_optax_state:
     value: false
 
-  # ── Swept HPs ───────────────────────────────────────────────────────────────
-  sigma:
+  # ── Per-group sigmas (#32) ──────────────────────────────────────────────────
+  # LoRA-eligible matmul weights and plain bias-like params share a range;
+  # logvar bounds get a one-OOM-smaller range since they live on a smaller
+  # absolute scale.
+  sigma_lora:
     distribution: log_uniform_values
     min: 5.0e-4
     max: 5.0e-3
-  one_minus_sigma_decay_rate:
+  sigma_nonlora:
+    distribution: log_uniform_values
+    min: 5.0e-4
+    max: 5.0e-3
+  sigma_logvar:
+    distribution: log_uniform_values
+    min: 5.0e-5
+    max: 5.0e-4
+
+  # ── Per-group decay rates ───────────────────────────────────────────────────
+  # Swept on `1 - decay_rate` (log_uniform); finer resolution near 1.0.
+  # Logvar window is wider since its smaller sigma can tolerate faster decay.
+  one_minus_sigma_decay_rate_lora:
     distribution: log_uniform_values
     min: 1.0e-8
     max: 1.0e-5
+  one_minus_sigma_decay_rate_nonlora:
+    distribution: log_uniform_values
+    min: 1.0e-8
+    max: 1.0e-5
+  one_minus_sigma_decay_rate_logvar:
+    distribution: log_uniform_values
+    min: 1.0e-7
+    max: 1.0e-4
+
+  # ── Optimiser learning rate ─────────────────────────────────────────────────
   lr:
     distribution: log_uniform_values
     min: 1.0e-6

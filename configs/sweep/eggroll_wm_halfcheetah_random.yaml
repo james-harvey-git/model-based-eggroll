@@ -1,6 +1,17 @@
+# EGGROLL from-scratch random sweep over per-group sigmas and decay rates (#32).
+#
+# Trains a fresh DynamicsNet end-to-end (no warm-start). Compared with the
+# finetune sweep, sigma windows are an order of magnitude larger to allow
+# real exploration from random init. Logvar bounds still get a one-OOM
+# smaller window since they live on a smaller absolute scale.
+#
+# Usage:
+#   uv run python scripts/init_sweep.py configs/sweep/eggroll_wm_halfcheetah_random.yaml
+#   RUNS_PER_GPU=12 SWEEP_ID=<id> sbatch --array=0-3 scripts/run_eggroll_wm_sweep_eit.slurm
+
 program: scripts/sweep_world_model.py
 method: random
-run_cap: 48
+run_cap: 72
 metric:
   name: world_model/val_mse
   goal: minimize
@@ -10,6 +21,7 @@ early_terminate:
   eta: 3
   s: 2
 parameters:
+  # ── Fixed architecture / batching / budget ───────────────────────────────────
   population_size:
     value: 4096
   group_size:
@@ -20,14 +32,39 @@ parameters:
     value: 0.9
   num_epochs:
     value: 1250000
-  sigma:
+
+  # ── Per-group sigmas (#32) ──────────────────────────────────────────────────
+  # Wider ranges than the finetune sweep — from-scratch needs more exploration.
+  sigma_lora:
     distribution: log_uniform_values
     min: 0.01
     max: 0.03
-  one_minus_sigma_decay_rate:
+  sigma_nonlora:
+    distribution: log_uniform_values
+    min: 0.01
+    max: 0.03
+  sigma_logvar:
+    distribution: log_uniform_values
+    min: 1.0e-3
+    max: 1.0e-2
+
+  # ── Per-group decay rates ───────────────────────────────────────────────────
+  # Swept on `1 - decay_rate` (log_uniform); finer resolution near 1.0.
+  # Logvar window is wider since its smaller sigma can tolerate faster decay.
+  one_minus_sigma_decay_rate_lora:
     distribution: log_uniform_values
     min: 1.0e-7
     max: 1.0e-4
+  one_minus_sigma_decay_rate_nonlora:
+    distribution: log_uniform_values
+    min: 1.0e-7
+    max: 1.0e-4
+  one_minus_sigma_decay_rate_logvar:
+    distribution: log_uniform_values
+    min: 1.0e-6
+    max: 1.0e-3
+
+  # ── Optimiser learning rate ─────────────────────────────────────────────────
   lr:
     distribution: log_uniform_values
     min: 1.0e-4

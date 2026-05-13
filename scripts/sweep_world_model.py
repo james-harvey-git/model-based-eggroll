@@ -46,17 +46,38 @@ def compose_config(overrides: dict | None = None) -> DictConfig:
     OmegaConf.update(base, "world_model.eggroll.solver", "adamw")
 
     if overrides:
+        # Convert log-scale `one_minus_sigma_decay_rate*` keys into their
+        # `sigma_decay_rate*` counterparts (scalar + per-group variants).
+        # Sweeping `1 - decay` on log_uniform_values gives finer resolution
+        # near 1.0 than sweeping the rate directly.
         if "one_minus_sigma_decay_rate" in overrides:
             overrides["sigma_decay_rate"] = 1.0 - float(
                 overrides.pop("one_minus_sigma_decay_rate")
             )
+        for group in ("lora", "nonlora", "logvar"):
+            src = f"one_minus_sigma_decay_rate_{group}"
+            dst = f"sigma_decay_rate_{group}"
+            if src in overrides:
+                overrides[dst] = 1.0 - float(overrides.pop(src))
+
         mapping = {
             "population_size": "world_model.eggroll.population_size",
             "group_size": "world_model.eggroll.group_size",
             "weight_decay": "world_model.eggroll.solver_kwargs.weight_decay",
             "b1": "world_model.eggroll.solver_kwargs.b1",
+            # Sigma: scalar form (backward-compat) sets all groups equal.
+            # Per-group forms write into the {lora, nonlora, logvar} sub-keys
+            # of the dict-form sigma in the default eggroll_ensemble.yaml.
+            # Pick ONE form per sweep — mixing scalar and per-group overrides
+            # in the same trial will produce a structured-config error.
             "sigma": "world_model.eggroll.sigma",
+            "sigma_lora": "world_model.eggroll.sigma.lora",
+            "sigma_nonlora": "world_model.eggroll.sigma.nonlora",
+            "sigma_logvar": "world_model.eggroll.sigma.logvar",
             "sigma_decay_rate": "world_model.eggroll.sigma_decay_rate",
+            "sigma_decay_rate_lora": "world_model.eggroll.sigma_decay_rate.lora",
+            "sigma_decay_rate_nonlora": "world_model.eggroll.sigma_decay_rate.nonlora",
+            "sigma_decay_rate_logvar": "world_model.eggroll.sigma_decay_rate.logvar",
             "lr": "world_model.eggroll.lr",
             "num_epochs": "world_model.num_epochs",
             "full_validation_interval": "world_model.full_validation_interval",
