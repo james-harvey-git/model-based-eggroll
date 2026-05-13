@@ -18,7 +18,7 @@ import optax
 import pytest
 
 from mbrl.eggroll.networks import DynamicsNet, PolicyNet
-from mbrl.eggroll.primitives import MLP, EggRoll, Linear
+from mbrl.eggroll.primitives import LOGVAR_PARAM, MLP, MM_PARAM, PARAM, EggRoll, Linear
 from mbrl.eggroll.training import (
     EGGROLLState,
     eggroll_step,
@@ -335,6 +335,23 @@ class TestDynamicsNet:
         assert init.frozen_params["backbone"]["activation"] == "relu"
         assert init.params["max_logvar"].shape == (_OBS_DIM + 1,)
         assert init.params["min_logvar"].shape == (_OBS_DIM + 1,)
+
+    def test_logvar_bounds_tagged_with_logvar_param(self):
+        """max_logvar/min_logvar carry the LOGVAR_PARAM es_map marker (issue #32).
+
+        Backbone leaves keep their standard markers (MM_PARAM for matmul
+        weights, PARAM for biases), so the per-group sigma classifier sees
+        the right structure.
+        """
+        init = DynamicsNet.rand_init(
+            jax.random.key(30), _OBS_DIM, _ACT_DIM, _HIDDEN,
+        )
+        assert init.es_map["max_logvar"] == LOGVAR_PARAM
+        assert init.es_map["min_logvar"] == LOGVAR_PARAM
+        # Backbone is an MLP → Linear → {weight (MM_PARAM), bias (PARAM)}.
+        backbone_layer_0 = init.es_map["backbone"]["0"]
+        assert backbone_layer_0["weight"] == MM_PARAM
+        assert backbone_layer_0["bias"] == PARAM
 
     def test_forward_eval_shape(self):
         key = jax.random.key(30)

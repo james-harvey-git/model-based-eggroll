@@ -14,6 +14,7 @@ import jax
 import jax.numpy as jnp
 
 from mbrl.eggroll.primitives import (
+    LOGVAR_PARAM,
     MLP,
     CommonInit,
     CommonParams,
@@ -86,17 +87,21 @@ class DynamicsNet(Model):
             dtype=dtype,
             init_scheme=init_scheme,
         )
-        # key is reused here because raw_value is provided — the key is never used
+        # key is reused here because raw_value is provided — the key is never used.
+        # _replace(es_map=LOGVAR_PARAM) tags these soft-clamp bounds so the
+        # per-group sigma machinery (issue #32) can target them with a distinct
+        # sigma. They still dispatch to _simple_full_update — same update
+        # mechanism as plain PARAM leaves.
         max_logvar = Parameter.rand_init(
             key, shape=None, scale=None,
             raw_value=jnp.full((obs_dim + 1,), max_logvar_init, dtype=dtype),
             dtype=dtype,
-        )
+        )._replace(es_map=LOGVAR_PARAM)
         min_logvar = Parameter.rand_init(
             key, shape=None, scale=None,
             raw_value=jnp.full((obs_dim + 1,), min_logvar_init, dtype=dtype),
             dtype=dtype,
-        )
+        )._replace(es_map=LOGVAR_PARAM)
         return merge_inits(backbone=backbone, max_logvar=max_logvar, min_logvar=min_logvar)
 
     @classmethod
