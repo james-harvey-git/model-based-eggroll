@@ -11,6 +11,9 @@ Changes from upstream:
   commented-out line; marked noqa: F841 in upstream, removed here to keep ruff clean)
 - Changed `any` → `Any` (typing) in CommonInit/CommonParams NamedTuple fields; upstream
   used the builtin `any` function as a type annotation, which is incorrect
+- Added LOGVAR_PARAM = 4 marker for soft-clamp logvar bounds (see issue #32). It
+  dispatches to _simple_full_update (same update mechanism as PARAM), but lets
+  the per-group sigma machinery target these leaves with a distinct sigma.
 """
 # ruff: noqa: E501  -- vendored code; do not reformat to fit line-length
 
@@ -30,6 +33,7 @@ PARAM = 0
 MM_PARAM = 1
 EMB_PARAM = 2
 EXCLUDED = 3
+LOGVAR_PARAM = 4   # soft-clamp logvar bounds — updated like PARAM, distinct sigma group
 
 
 class CommonInit(NamedTuple):
@@ -196,7 +200,13 @@ class EggRoll(Noiser):
 
     @classmethod
     def _do_update(cls, param, base_key, fitnesses, iterinfos, map_classification, sigma, frozen_noiser_params, **kwargs):
-        update_fn = [_simple_full_update, _simple_lora_update, _noop_update, _noop_update][map_classification]
+        update_fn = [
+            _simple_full_update,   # PARAM
+            _simple_lora_update,   # MM_PARAM
+            _noop_update,          # EMB_PARAM
+            _noop_update,          # EXCLUDED
+            _simple_full_update,   # LOGVAR_PARAM — same mechanism as PARAM, distinct sigma group (issue #32)
+        ][map_classification]
 
         if len(base_key.shape) == 0:
             new_grad = update_fn(sigma, param, base_key, fitnesses, iterinfos, frozen_noiser_params)
