@@ -6,19 +6,11 @@
 # run (reset_optax_state=false) — empirically this helps convergence in
 # the finetune regime.
 #
-# Initial ranges informed by empirical exploration on halfcheetah-medium:
+# Sigma ranges informed by empirical exploration on halfcheetah-medium:
 #   sigma=0.01 with lr=1e-5  → too large, val MSE regressed.
 #   sigma=5e-4 with lr=1e-5  → too small, converged immediately to a
 #                              plateau and learned little new.
-# So the swept window brackets the gap between those two regimes. Logvar
-# bounds live on a smaller scale (O(1)–O(10)) than weight matrices, so
-# their sigma range is one OOM smaller. Decay rates get separate per-group
-# windows since the right schedule depends on the absolute sigma.
-#
-# Architecture/budget constants match the user's reference finetune
-# command (population_size=4096, group_size=16, activation=pqn,
-# full_validation_interval=1000, num_epochs=1175000 = 1.25M total
-# update steps after the stage-1 75k).
+# So the swept window brackets the gap between those two regimes.
 #
 # Usage:
 #   uv run python scripts/init_sweep.py configs/sweep/eggroll_wm_halfcheetah_finetune.yaml
@@ -58,10 +50,7 @@ parameters:
   reset_optax_state:
     value: false
 
-  # ── Per-group sigmas (#32) ──────────────────────────────────────────────────
-  # LoRA-eligible matmul weights and plain bias-like params share a range;
-  # logvar bounds get a one-OOM-smaller range since they live on a smaller
-  # absolute scale.
+  # ── Per-group sigmas (#32) — uniform windows; sweep discovers any difference
   sigma_lora:
     distribution: log_uniform_values
     min: 5.0e-4
@@ -72,12 +61,11 @@ parameters:
     max: 5.0e-3
   sigma_logvar:
     distribution: log_uniform_values
-    min: 5.0e-5
-    max: 5.0e-4
+    min: 5.0e-4
+    max: 5.0e-3
 
-  # ── Per-group decay rates ───────────────────────────────────────────────────
-  # Swept on `1 - decay_rate` (log_uniform); finer resolution near 1.0.
-  # Logvar window is wider since its smaller sigma can tolerate faster decay.
+  # ── Per-group decay rates — uniform windows
+  # Swept on `1 - decay_rate` (log_uniform) for finer resolution near 1.0.
   one_minus_sigma_decay_rate_lora:
     distribution: log_uniform_values
     min: 1.0e-8
@@ -88,8 +76,8 @@ parameters:
     max: 1.0e-5
   one_minus_sigma_decay_rate_logvar:
     distribution: log_uniform_values
-    min: 1.0e-7
-    max: 1.0e-4
+    min: 1.0e-8
+    max: 1.0e-5
 
   # ── Optimiser learning rate ─────────────────────────────────────────────────
   lr:
