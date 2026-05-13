@@ -238,11 +238,11 @@ class MLEDynamicsNet(EnsembleDynamics):
             )(obs_b, action_b)
             mse_loss = jnp.mean((targets - mean) ** 2 * jnp.exp(-logvar))
             var_loss = jnp.mean(logvar)
-            # Use the unbroadcast (D,)-shaped parameters directly (matching
+            # Read the (D,)-shaped soft-clamp parameters directly (matching
             # MLEEnsemble at mle.py:131-132). Going via the vmapped forward
-            # returns max/min_logvar with a batch axis, which would scale this
-            # penalty by batch_size and (paradoxically) collapse max and min
-            # together to large negative values — see GitHub PR #31 discussion.
+            # would return them with a batch axis, scaling the penalty by
+            # batch_size and (paradoxically) collapsing max and min together
+            # to large negative values.
             max_logvar = params["max_logvar"]
             min_logvar = params["min_logvar"]
             logvar_diff = jnp.sum(max_logvar - min_logvar)

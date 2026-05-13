@@ -89,9 +89,9 @@ class DynamicsNet(Model):
         )
         # key is reused here because raw_value is provided — the key is never used.
         # _replace(es_map=LOGVAR_PARAM) tags these soft-clamp bounds so the
-        # per-group sigma machinery (issue #32) can target them with a distinct
-        # sigma. They still dispatch to _simple_full_update — same update
-        # mechanism as plain PARAM leaves.
+        # per-group sigma machinery can target them with a distinct sigma. They
+        # still dispatch to _simple_full_update — same update mechanism as
+        # plain PARAM leaves.
         max_logvar = Parameter.rand_init(
             key, shape=None, scale=None,
             raw_value=jnp.full((obs_dim + 1,), max_logvar_init, dtype=dtype),

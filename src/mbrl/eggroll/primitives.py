@@ -152,9 +152,9 @@ class EggRoll(Noiser):
         """
         Return frozen_noiser_params and noiser_params.
 
-        ``sigma`` may be either a scalar (uniform across all params, backward
-        compat) or a pytree mirroring ``params`` (per-leaf sigma — see issue
-        #32). Scalars are splatted into a uniform tree at init time.
+        ``sigma`` may be either a scalar (uniform across all params) or a
+        pytree mirroring ``params`` (per-leaf sigma). Scalars are splatted
+        into a uniform tree at init time.
 
         ``decay_tree`` is an optional per-leaf decay-rate pytree mirroring
         ``params``. When provided it is stored in ``frozen_noiser_params``
@@ -225,7 +225,7 @@ class EggRoll(Noiser):
             _simple_lora_update,   # MM_PARAM
             _noop_update,          # EMB_PARAM
             _noop_update,          # EXCLUDED
-            _simple_full_update,   # LOGVAR_PARAM — same mechanism as PARAM, distinct sigma group (issue #32)
+            _simple_full_update,   # LOGVAR_PARAM — same mechanism as PARAM, distinct sigma group
         ][map_classification]
 
         if len(base_key.shape) == 0:
@@ -244,7 +244,7 @@ class EggRoll(Noiser):
 
     @classmethod
     def _do_updates_original(cls, frozen_noiser_params, noiser_params, params, base_keys, fitnesses, iterinfos, es_map):
-        # noiser_params["sigma"] is a pytree mirroring `params` post-#32; thread
+        # noiser_params["sigma"] is a pytree mirroring `params`; thread
         # the per-leaf sigma alongside the existing tree.map.
         new_grad = jax.tree.map(
             lambda p, k, m, s: cls._do_update(p, k, fitnesses, iterinfos, m, s, frozen_noiser_params),
@@ -260,7 +260,7 @@ class EggRoll(Noiser):
         significantly faster for large models.
         """
         # Flatten all elements from the params, keys, map and sigma pytrees.
-        # noiser_params["sigma"] mirrors `params` post-#32, so its flatten order
+        # noiser_params["sigma"] mirrors `params`, so its flatten order
         # aligns with flat_params and we can vmap over per-leaf sigma values.
         flat_params, treedef = tree_flatten(params)
         flat_keys, _ = tree_flatten(base_keys)
@@ -380,7 +380,7 @@ def merge_frozen(common, **kwargs):
 
 
 def call_submodule(cls, name, common_params, *args, **kwargs):
-    # When `noiser_params["sigma"]` is a per-leaf tree (EggRoll path post-#32),
+    # When `noiser_params["sigma"]` is a per-leaf tree (EggRoll path),
     # slice it alongside `params`/`frozen_params`/`es_tree_key`. When it isn't
     # (base Noiser path, e.g. MLEDynamicsNet uses `noiser_params={}`), the
     # guard falls through cleanly.

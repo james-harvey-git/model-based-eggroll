@@ -126,9 +126,8 @@ def init_eggroll_state(
         es_key: JAX PRNG key used to generate the per-parameter tree of base
             keys (``es_tree_key``).
         sigma: Initial perturbation scale. Either a scalar (uniform across
-            all params — backward-compat), a ``{lora, nonlora, logvar}`` dict
-            (per-group, issue #32), or a pre-built sigma pytree mirroring
-            ``common_init.params``.
+            all params), a ``{lora, nonlora, logvar}`` dict (per-group), or a
+            pre-built sigma pytree mirroring ``common_init.params``.
         lr: Learning rate for the internal optax optimiser.
         rank: LoRA rank for weight-matrix perturbations (default 1).
         sigma_decay_rate: Per-step decay rate(s). Either a scalar (uniform)

@@ -1,4 +1,4 @@
-# EGGROLL finetune sweep over per-group sigmas and decay rates (#32).
+# EGGROLL finetune sweep over per-group sigmas and decay rates.
 #
 # Starts every trial from the same stage-1 MLEDynamicsNet checkpoint
 # (`init_checkpoint` below) so the only variation across trials is the
@@ -50,7 +50,7 @@ parameters:
   reset_optax_state:
     value: false
 
-  # ── Per-group sigmas (#32) — uniform windows; sweep discovers any difference
+  # ── Per-group sigmas — uniform windows; sweep discovers any difference
   sigma_lora:
     distribution: log_uniform_values
     min: 5.0e-4

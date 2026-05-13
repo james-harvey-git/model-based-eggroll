@@ -303,8 +303,9 @@ class EGGROLLEnsemble(EnsembleDynamics):
             activation=cfg.activation,
             init_scheme=str(cfg.get("init_scheme", "eggroll")),
         )
-        # Sigma and decay rate may be scalar (uniform) or a {lora, nonlora,
-        # logvar} dict (per-group, issue #32). init_eggroll_state handles both.
+        # Sigma and decay rate may each be a scalar (uniform across all params)
+        # or a {lora, nonlora, logvar} dict (per-group). init_eggroll_state
+        # handles both forms.
         sigma_cfg = _parse_sigma_cfg(cfg.eggroll.sigma)
         decay_cfg = _parse_sigma_cfg(cfg.eggroll.sigma_decay_rate)
         state = init_eggroll_state(
@@ -412,9 +413,9 @@ class EGGROLLEnsemble(EnsembleDynamics):
                 fnp, dict(noiser_params), params, etk, normalized, iterinfos, em
             )
 
-            # Per-leaf functional sigma decay (issue #32). `sigma_decay_tree`
-            # is a pytree of per-leaf decay rates mirroring `noiser_params
-            # ["sigma"]`; map across both to apply the per-group decay step.
+            # Per-leaf functional sigma decay. `sigma_decay_tree` is a pytree
+            # of per-leaf decay rates mirroring `noiser_params["sigma"]`; map
+            # across both to apply the per-group decay step.
             noiser_params = {
                 **noiser_params,
                 "sigma": jax.tree.map(

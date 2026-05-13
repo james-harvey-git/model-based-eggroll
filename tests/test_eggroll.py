@@ -182,8 +182,8 @@ class TestInitEggrollState:
             use_bias=True, activation="relu", dtype="float32",
         )
         state = init_eggroll_state(common_init, es_key, sigma=0.05, lr=1e-3)
-        # Post-#32: sigma is a per-leaf tree mirroring params; scalar input
-        # splats to a uniform tree (every leaf == 0.05).
+        # Sigma is stored as a per-leaf tree mirroring params; a scalar input
+        # splats to a uniform tree where every leaf == the scalar.
         for leaf in jax.tree.leaves(state.noiser_params["sigma"]):
             assert jnp.allclose(leaf, 0.05)
         assert jax.tree.structure(state.noiser_params["sigma"]) == jax.tree.structure(state.params)
@@ -319,8 +319,8 @@ class TestEggrollStep:
         iterinfos = get_iterinfos(epoch=0, num_envs=num_envs)
         fitnesses = jnp.arange(num_envs, dtype=jnp.float32)
         new_state = eggroll_step(state, fitnesses, iterinfos)
-        # Post-#32: sigma is a per-leaf tree; assert every leaf still equals
-        # the requested sigma (eggroll_step does not decay).
+        # Sigma is a per-leaf tree; assert every leaf still equals the
+        # requested sigma (eggroll_step does not decay).
         for leaf in jax.tree.leaves(new_state.noiser_params["sigma"]):
             assert jnp.allclose(leaf, sigma)
 
@@ -498,11 +498,11 @@ class TestDynamicsNet:
         assert logvar.shape == (num_envs, _OBS_DIM + 1)
 
 
-# ── Per-group sigma (#32) ──────────────────────────────────────────────────────
+# ── Per-group sigma ────────────────────────────────────────────────────────────
 
 
 class TestPerGroupSigma:
-    """End-to-end checks for per-leaf sigma plumbing on DynamicsNet (#32).
+    """End-to-end checks for per-leaf sigma plumbing on DynamicsNet.
 
     Uses DynamicsNet specifically because it's the only network in the repo
     that emits LOGVAR_PARAM leaves alongside MM_PARAM and PARAM.

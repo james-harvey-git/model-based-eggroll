@@ -129,9 +129,9 @@ class TestToyConvergence:
             raw_fitnesses = -(preds - batch_y) ** 2  # per-perturbation, higher is better
             normalized = EggRoll.convert_fitnesses(fnp, noiser_params, raw_fitnesses)
             noiser_params, params = jit_update(noiser_params, params, normalized, iterinfos)
-            # Linear sigma decay — caller's responsibility per eggroll_step docstring.
-            # Post-#32: sigma is a per-leaf tree mirroring params; splat the new
-            # scalar value across every leaf via jax.tree.map.
+            # Linear sigma decay — caller's responsibility per eggroll_step
+            # docstring. Sigma is a per-leaf tree mirroring params; splat the
+            # new scalar value across every leaf via jax.tree.map.
             new_sigma = sigma_init * (1 - (epoch + 1) / num_epochs)
             noiser_params["sigma"] = jax.tree.map(
                 lambda _: jnp.float32(new_sigma), noiser_params["sigma"]

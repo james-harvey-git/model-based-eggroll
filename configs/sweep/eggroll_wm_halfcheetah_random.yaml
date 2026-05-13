@@ -1,4 +1,4 @@
-# EGGROLL from-scratch random sweep over per-group sigmas and decay rates (#32).
+# EGGROLL from-scratch random sweep over per-group sigmas and decay rates.
 #
 # Trains a fresh DynamicsNet end-to-end (no warm-start).
 #
@@ -30,7 +30,7 @@ parameters:
   num_epochs:
     value: 1250000
 
-  # ── Per-group sigmas (#32) ──────────────────────────────────────────────────
+  # ── Per-group sigmas ────────────────────────────────────────────────────────
   sigma_lora:
     distribution: log_uniform_values
     min: 0.01
