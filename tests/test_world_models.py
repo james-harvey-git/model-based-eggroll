@@ -257,6 +257,27 @@ EGGROLL_SLOW_CFG = OmegaConf.create(
     }
 )
 
+EGGROLL_PERGROUP_CFG = OmegaConf.create(
+    {
+        "num_members": NUM_EGGROLL_MEMBERS,
+        "hidden_dims": [8, 8],
+        "activation": "relu",
+        "num_epochs": 5,
+        "validation_split": 0.2,
+        "logvar_diff_coef": 0.01,
+        "log_interval": 1,
+        "full_validation_interval": 1,
+        "eggroll": {
+            "population_size": 8,
+            "group_size": 2,
+            "noise_reuse": 1,
+            "sigma": {"lora": 0.01, "nonlora": 0.005, "logvar": 0.001},
+            "sigma_decay_rate": {"lora": 0.99, "nonlora": 0.95, "logvar": 0.9},
+            "lr": 1e-3,
+        },
+    }
+)
+
 EGGROLL_UNGROUPED_CFG = OmegaConf.create(
     {
         "num_members": NUM_EGGROLL_MEMBERS,
@@ -494,6 +515,45 @@ class TestEGGROLLEnsembleCheckpoint:
         means_b, stds_b = reloaded.predict_ensemble(obs, action)
         assert jnp.allclose(means_a, means_b)
         assert jnp.allclose(stds_a, stds_b)
+
+
+class TestEGGROLLEnsemblePerGroup:
+    """End-to-end EGGROLLEnsemble.train with dict-form per-group sigmas (#32)."""
+
+    def test_eggroll_train_end_to_end_per_group(self, synthetic_dataset):
+        """Train from scratch with three distinct per-group sigmas and decay rates.
+
+        Asserts the run completes, the final sigma tree reflects the per-group
+        decay (sigma_init_group * decay_group ** num_epochs), and the trained
+        model produces finite predictions.
+        """
+        model = EGGROLLEnsemble(
+            OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", EGGROLL_PERGROUP_CFG,
+        )
+        model.train(synthetic_dataset, EGGROLL_PERGROUP_CFG, jax.random.key(60))
+        jax.effects_barrier()
+
+        assert model._state is not None
+        n = int(EGGROLL_PERGROUP_CFG.num_epochs)
+        sigma_tree = model._state.noiser_params["sigma"]
+        # Logvar group: init 0.001, decay 0.9, n=5 → 0.001 * 0.9**5.
+        assert jnp.allclose(sigma_tree["max_logvar"], 0.001 * 0.9 ** n, rtol=1e-5)
+        assert jnp.allclose(sigma_tree["min_logvar"], 0.001 * 0.9 ** n, rtol=1e-5)
+        # Lora group (backbone MM weights): init 0.01, decay 0.99, n=5.
+        assert jnp.allclose(
+            sigma_tree["backbone"]["0"]["weight"], 0.01 * 0.99 ** n, rtol=1e-5,
+        )
+        # Nonlora group (backbone biases): init 0.005, decay 0.95, n=5.
+        assert jnp.allclose(
+            sigma_tree["backbone"]["0"]["bias"], 0.005 * 0.95 ** n, rtol=1e-5,
+        )
+
+        # Trained model produces finite ensemble predictions.
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        means, stds = model.predict_ensemble(obs, action)
+        assert jnp.all(jnp.isfinite(means))
+        assert jnp.all(jnp.isfinite(stds))
 
 
 # ---------------------------------------------------------------------------

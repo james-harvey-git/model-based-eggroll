@@ -14,6 +14,7 @@ Rollout semantics:
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -30,6 +31,17 @@ from mbrl.eggroll.training import (
 )
 from mbrl.world_models.base import EnsembleDynamics
 from mbrl.world_models.termination_fns import get_termination_fn
+
+
+def _parse_sigma_cfg(value: Any) -> Any:
+    """Convert a cfg sigma/decay_rate value into the form init_eggroll_state expects.
+
+    - DictConfig with {lora, nonlora, logvar} keys → plain dict of floats.
+    - Anything else (scalar) → ``float(value)``.
+    """
+    if isinstance(value, DictConfig):
+        return {k: float(value[k]) for k in ("lora", "nonlora", "logvar")}
+    return float(value)
 
 
 def _eggroll_work_counters(
@@ -291,11 +303,16 @@ class EGGROLLEnsemble(EnsembleDynamics):
             activation=cfg.activation,
             init_scheme=str(cfg.get("init_scheme", "eggroll")),
         )
+        # Sigma and decay rate may be scalar (uniform) or a {lora, nonlora,
+        # logvar} dict (per-group, issue #32). init_eggroll_state handles both.
+        sigma_cfg = _parse_sigma_cfg(cfg.eggroll.sigma)
+        decay_cfg = _parse_sigma_cfg(cfg.eggroll.sigma_decay_rate)
         state = init_eggroll_state(
             common_init,
             es_rng,
-            sigma=float(cfg.eggroll.sigma),
+            sigma=sigma_cfg,
             lr=float(cfg.eggroll.lr),
+            sigma_decay_rate=decay_cfg,
             group_size=int(cfg.eggroll.group_size),
             noise_reuse=int(cfg.eggroll.noise_reuse),
             solver=resolve_optax_solver(solver_name),
@@ -348,7 +365,10 @@ class EGGROLLEnsemble(EnsembleDynamics):
         em = state.es_map
         pop = int(cfg.eggroll.population_size)
         n_prompts = pop if group_size == 0 else pop // group_size
-        sigma_decay = float(cfg.eggroll.sigma_decay_rate)
+        # Per-leaf decay tree, built by init_eggroll_state from cfg.eggroll
+        # .sigma_decay_rate. Captured here as a static closure outside
+        # fori_loop, same pattern as fnp / fp / etk.
+        sigma_decay_tree = state.frozen_noiser_params["sigma_decay_rate"]
         log_interval = int(cfg.log_interval)
         logvar_diff_coef = float(cfg.get("logvar_diff_coef", 0.01))
         n_train = train_data.obs.shape[0]
@@ -392,11 +412,14 @@ class EGGROLLEnsemble(EnsembleDynamics):
                 fnp, dict(noiser_params), params, etk, normalized, iterinfos, em
             )
 
-            # Functional sigma decay over the per-leaf sigma tree (issue #32).
-            # `sigma_decay` is a scalar here; commit 5 swaps to a per-leaf decay tree.
+            # Per-leaf functional sigma decay (issue #32). `sigma_decay_tree`
+            # is a pytree of per-leaf decay rates mirroring `noiser_params
+            # ["sigma"]`; map across both to apply the per-group decay step.
             noiser_params = {
                 **noiser_params,
-                "sigma": jax.tree.map(lambda s: s * sigma_decay, noiser_params["sigma"]),
+                "sigma": jax.tree.map(
+                    lambda s, d: s * d, noiser_params["sigma"], sigma_decay_tree,
+                ),
             }
 
             # Log train loss every log_interval and full-validation MSE after

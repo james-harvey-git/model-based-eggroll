@@ -597,6 +597,37 @@ class TestPerGroupSigma:
         # Strict ordering of average update magnitude.
         assert lora_delta > nonlora_delta > logvar_delta > 0.0
 
+    def test_per_group_decay_applied(self):
+        """init_eggroll_state stores per-group decay_tree in frozen_noiser_params.
+
+        Verifies that decay rates classified by es_map land on the right
+        leaves and that a manual N-step decay matches expected per-group
+        sigma values.
+        """
+        model_key, es_key = jax.random.split(jax.random.key(60))
+        common_init = DynamicsNet.rand_init(
+            model_key, _OBS_DIM, _ACT_DIM, _HIDDEN,
+        )
+        state = init_eggroll_state(
+            common_init, es_key,
+            sigma={"lora": 0.1, "nonlora": 0.05, "logvar": 0.001},
+            lr=1e-3,
+            sigma_decay_rate={"lora": 0.9, "nonlora": 0.8, "logvar": 0.5},
+        )
+        decay_tree = state.frozen_noiser_params["sigma_decay_rate"]
+        assert jnp.allclose(decay_tree["max_logvar"], 0.5)
+        assert jnp.allclose(decay_tree["min_logvar"], 0.5)
+        assert jnp.allclose(decay_tree["backbone"]["0"]["weight"], 0.9)
+        assert jnp.allclose(decay_tree["backbone"]["0"]["bias"], 0.8)
+
+        # Apply the decay step manually three times and verify per-group sigmas.
+        sigma_tree = state.noiser_params["sigma"]
+        for _ in range(3):
+            sigma_tree = jax.tree.map(lambda s, d: s * d, sigma_tree, decay_tree)
+        assert jnp.allclose(sigma_tree["max_logvar"], 0.001 * 0.5 ** 3)
+        assert jnp.allclose(sigma_tree["backbone"]["0"]["weight"], 0.1 * 0.9 ** 3)
+        assert jnp.allclose(sigma_tree["backbone"]["0"]["bias"], 0.05 * 0.8 ** 3)
+
 
 # ── PolicyNet ──────────────────────────────────────────────────────────────────
 

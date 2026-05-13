@@ -16,8 +16,18 @@ eggroll:
   solver: adamw
   solver_kwargs: {weight_decay: 1e-5, b1: 0.9}
   noise_reuse: 1        # fresh perturbation directions each epoch
-  sigma: 0.02
-  sigma_decay_rate: 0.999995
+  # Per-group sigmas / decay rates (lora / nonlora / logvar) — issue #32.
+  # The scalar form (e.g. `sigma: 0.02`) is also accepted for backward compat
+  # and is equivalent to setting all three groups to the same value. The dict
+  # form is preferred so per-group tuning is visible at the config site.
+  sigma:
+    lora: 0.02
+    nonlora: 0.02
+    logvar: 0.02
+  sigma_decay_rate:
+    lora: 0.999995
+    nonlora: 0.999995
+    logvar: 0.999995
   lr: 3e-4
   use_batched_update: true
 

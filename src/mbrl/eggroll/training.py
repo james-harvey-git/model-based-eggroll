@@ -89,12 +89,33 @@ def resolve_optax_solver(name: str) -> Any:
     return _OPTAX_SOLVERS[solver_name]
 
 
+_GROUP_KEYS = frozenset({"lora", "nonlora", "logvar"})
+
+
+def _is_groups_dict(value: Any) -> bool:
+    """Distinguish a {lora, nonlora, logvar} groups dict from a params-shaped pytree.
+
+    Both are dicts at the top level, so we need to inspect keys: only a groups
+    dict has *exactly* the three group keys.
+    """
+    return isinstance(value, dict) and set(value.keys()) == _GROUP_KEYS
+
+
+def _resolve_groups(value: Any) -> dict[str, float]:
+    """Normalise a scalar or groups dict into ``{lora, nonlora, logvar}`` floats."""
+    if _is_groups_dict(value):
+        return {k: float(value[k]) for k in ("lora", "nonlora", "logvar")}
+    v = float(value)
+    return {"lora": v, "nonlora": v, "logvar": v}
+
+
 def init_eggroll_state(
     common_init: CommonInit,
     es_key: jax.Array,
-    sigma: float,
+    sigma: Any,
     lr: float,
     rank: int = 1,
+    sigma_decay_rate: Any = 1.0,
     **eggroll_kwargs: Any,
 ) -> EGGROLLState:
     """Construct an EGGROLLState from the output of Model.rand_init.
@@ -104,9 +125,17 @@ def init_eggroll_state(
             ``frozen_params``, ``scan_map``, and ``es_map``.
         es_key: JAX PRNG key used to generate the per-parameter tree of base
             keys (``es_tree_key``).
-        sigma: Initial perturbation scale.
+        sigma: Initial perturbation scale. Either a scalar (uniform across
+            all params — backward-compat), a ``{lora, nonlora, logvar}`` dict
+            (per-group, issue #32), or a pre-built sigma pytree mirroring
+            ``common_init.params``.
         lr: Learning rate for the internal optax optimiser.
         rank: LoRA rank for weight-matrix perturbations (default 1).
+        sigma_decay_rate: Per-step decay rate(s). Either a scalar (uniform)
+            or a ``{lora, nonlora, logvar}`` dict. Stored in
+            ``frozen_noiser_params["sigma_decay_rate"]`` as a per-leaf tree
+            the caller's decay step can consume via ``jax.tree.map``.
+            Default ``1.0`` (no decay).
         **eggroll_kwargs: Additional keyword arguments forwarded to
             ``EggRoll.init_noiser`` (e.g. ``group_size``, ``freeze_nonlora``,
             ``noise_reuse``, ``use_batched_update``).
@@ -114,8 +143,26 @@ def init_eggroll_state(
     Returns:
         EGGROLLState ready for use in a training loop.
     """
+    # Resolve sigma into a per-leaf pytree.
+    #   - {lora, nonlora, logvar} groups dict → build per-leaf tree via es_map.
+    #   - Scalar → pass through; init_noiser splats it into a uniform tree.
+    #   - Anything else with multiple leaves → assumed pre-built pytree mirroring params.
+    if _is_groups_dict(sigma):
+        sigma_tree = build_sigma_tree(
+            common_init.params, common_init.es_map, _resolve_groups(sigma),
+        )
+    elif isinstance(sigma, (int, float)) or jax.tree.structure(sigma).num_leaves == 1:
+        sigma_tree = jnp.float32(sigma)
+    else:
+        sigma_tree = sigma  # pre-built pytree mirroring params
+
+    decay_tree = build_sigma_tree(
+        common_init.params, common_init.es_map, _resolve_groups(sigma_decay_rate),
+    )
+
     frozen_noiser_params, noiser_params = EggRoll.init_noiser(
-        common_init.params, sigma, lr, rank=rank, **eggroll_kwargs
+        common_init.params, sigma_tree, lr, rank=rank, decay_tree=decay_tree,
+        **eggroll_kwargs,
     )
     es_tree_key = simple_es_tree_key(common_init.params, es_key, common_init.scan_map)
     return EGGROLLState(
