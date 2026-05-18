@@ -276,7 +276,12 @@ def main(cfg: DictConfig) -> None:
                 f"No world model checkpoint at '{wm_ckpt}'. "
                 f"Pass checkpoint_dir= pointing to a world-model run directory."
             )
-        wm_group = _load_pickle(wm_ckpt)["wm_group"]
+        ckpt = _load_pickle(wm_ckpt)
+        wm_group = ckpt["wm_group"]
+        # Replace cfg.world_model with the checkpoint's recorded world_model_cfg so
+        # Logger auto-naming and auto-tagging reflect the trained model
+        # (e.g. an EGGROLL checkpoint shouldn't pick up the Hydra-default `mle`).
+        OmegaConf.update(cfg, "world_model", ckpt["world_model_cfg"], force_add=True)
     else:
         raise ValueError(
             f"Unknown stage '{stage}'. Expected one of: "
