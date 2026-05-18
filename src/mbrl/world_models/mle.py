@@ -166,7 +166,7 @@ def _train_dynamics(
         if log_fn is not None:
             _log_fn = log_fn
 
-            def _log_callback(epoch_i, train_loss_i, val_mse_i) -> None:
+            def _log_callback(epoch_i, train_loss_i, val_mse_i, val_mse_elite_i) -> None:
                 epoch_py = int(epoch_i) + 1
                 update_step = epoch_py * batches_per_epoch
                 transitions_seen, forward_evals = _mle_work_counters(
@@ -182,6 +182,7 @@ def _train_dynamics(
                     transitions_seen,
                     forward_evals,
                     epoch=epoch_py,
+                    val_mse_elite=float(val_mse_elite_i),
                 )
 
             jax.debug.callback(
@@ -189,6 +190,7 @@ def _train_dynamics(
                 epoch,
                 batch_losses.mean(),
                 val_mse_per_member.mean(),
+                val_mse_per_member[elite_idxs].mean(),
             )
 
         return rng, train_state, elite_idxs
@@ -258,6 +260,47 @@ class MLEEnsemble(EnsembleDynamics):
         )
         ensemble_std = jnp.exp(0.5 * ensemble_logvar)
         return ensemble_mean, ensemble_std
+
+    def compute_val_mse(self, dataset: Transition) -> jax.Array:
+        """Elite-only mean MSE over *dataset*, matching training-time ``val_mse_elite``.
+
+        Iterates contiguous chunks of size 1024 with an SSE/count accumulator so
+        all N transitions are covered (no shuffling, no tail-drop).
+        """
+        assert self.params is not None, "Model must be trained before compute_val_mse()"
+        assert self.num_elites is not None
+        params = cast(dict, self.params)
+        num_elites = self.num_elites
+        inputs = jnp.concatenate([dataset.obs, dataset.action], axis=-1)
+        delta_obs = dataset.next_obs - dataset.obs
+        targets = jnp.concatenate([delta_obs, dataset.reward[:, None]], axis=-1)
+
+        @jax.jit
+        def _batch_sse(bi: jax.Array, bt: jax.Array) -> jax.Array:
+            mean_pred, _ = cast(
+                tuple[jax.Array, jax.Array], self.model.apply(params, bi)
+            )
+            # mean_pred: (num_elites, B, D); per-elite SSE summed over batch + features
+            return ((mean_pred - bt[None]) ** 2).sum(axis=(1, 2))
+
+        n = int(inputs.shape[0])
+        batch_size = 1024
+        num_full = n // batch_size
+        sse = jnp.zeros((num_elites,), dtype=jnp.float32)
+        if num_full > 0:
+            full_inputs = inputs[: num_full * batch_size].reshape(num_full, batch_size, -1)
+            full_targets = targets[: num_full * batch_size].reshape(num_full, batch_size, -1)
+            sse, _ = jax.lax.scan(
+                lambda c, b: (c + _batch_sse(b[0], b[1]), None),
+                sse,
+                (full_inputs, full_targets),
+            )
+        tail = n - num_full * batch_size
+        if tail > 0:
+            sse = sse + _batch_sse(inputs[-tail:], targets[-tail:])
+        elements_per_elite = n * int(targets.shape[1])
+        per_elite_mse = sse / elements_per_elite
+        return per_elite_mse.mean()
 
     def train(
         self,

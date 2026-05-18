@@ -15,6 +15,7 @@ _STAGE_SUFFIX: dict[str, str] = {
     "world_model": "-wm",
     "policy": "-pol",
     "eval": "-eval",
+    "wm_eval": "-wmeval",
     "all": "",
 }
 
@@ -57,7 +58,7 @@ def _auto_name(cfg: DictConfig, timestamp: str) -> str:
     wm = _world_model_type(cfg)
     dataset = _dataset_short(cfg)
     seed = cfg.seed
-    if stage == "world_model":
+    if stage in ("world_model", "wm_eval"):
         return f"{wm}-{dataset}-s{seed}-{timestamp}{stage_suffix}"
     algo = _algorithm_type(cfg)
     return f"{wm}-{algo}-{dataset}-s{seed}-{timestamp}{stage_suffix}"
@@ -70,8 +71,10 @@ def auto_tags(cfg: DictConfig) -> list[str]:
     auto: set[str] = set()
     auto.add(_world_model_type(cfg))
     auto.add(_dataset_short(cfg))
-    if stage != "world_model":
+    if stage in ("policy", "eval", "all"):
         auto.add(_algorithm_type(cfg))
+    if stage == "wm_eval":
+        auto.add("wm_eval")
     if _is_sweep_run():
         auto.add("sweep")
     if os.environ.get("SLURM_JOB_ID"):
@@ -166,5 +169,17 @@ class Logger:
                 "eval/raw_score": raw_score,
                 "eval/normalized_score": normalized_score,
                 "eval/dataset_id": dataset_id,
+            }
+        )
+
+    def log_wm_eval(self, train_dataset_id: str, eval_dataset_id: str, val_mse: float) -> None:
+        """Log a world-model validation MSE on an arbitrary eval dataset."""
+        if not self.enabled:
+            return
+        wandb.log(
+            {
+                "wm_eval/val_mse": val_mse,
+                "wm_eval/train_dataset_id": train_dataset_id,
+                "wm_eval/eval_dataset_id": eval_dataset_id,
             }
         )

@@ -101,7 +101,15 @@ class TestMLEEnsembleTraining:
         model = MLEEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
         log_calls: list[dict] = []
 
-        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals, epoch=None):
+        def log_fn(
+            step,
+            train_loss,
+            val_mse,
+            transitions_seen,
+            forward_evals,
+            epoch=None,
+            val_mse_elite=None,
+        ):
             log_calls.append(
                 {
                     "step": int(step),
@@ -110,6 +118,9 @@ class TestMLEEnsembleTraining:
                     "val_mse": float(val_mse),
                     "transitions_seen": int(transitions_seen),
                     "forward_evals": int(forward_evals),
+                    "val_mse_elite": (
+                        None if val_mse_elite is None else float(val_mse_elite)
+                    ),
                 }
             )
 

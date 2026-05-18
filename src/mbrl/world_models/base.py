@@ -58,3 +58,13 @@ class EnsembleDynamics(ABC):
         log_fn: Callable[..., None] | None = None,
     ) -> None:
         """Fit the ensemble to the provided offline dataset."""
+
+    @abstractmethod
+    def compute_val_mse(self, dataset: Transition) -> jax.Array:
+        """Return a scalar validation MSE for *dataset* matching the training-time formula.
+
+        Each subclass implements the same scalar its training loop logs as ``val_mse``
+        (or ``val_mse_elite`` in the MLE-ensemble case). Iteration is deterministic
+        over contiguous chunks covering all transitions — no shuffling, no tail drop —
+        so the returned number is reproducible and well-defined on arbitrary datasets.
+        """
