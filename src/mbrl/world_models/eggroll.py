@@ -201,6 +201,21 @@ class EGGROLLEnsemble(EnsembleDynamics):
         MSE is logged after the first update at step 1 plus every
         ``full_validation_interval`` steps thereafter via ``jax.lax.cond`` +
         ``jax.debug.callback`` when ``log_fn`` is provided.
+
+        Warm-start (issue #30): when ``cfg.init_checkpoint`` is set to a
+        stage-1 ``MLEDynamicsNet`` checkpoint, this method
+        - splices the loaded params (and, when ``cfg.reset_optax_state`` is
+          ``False``, the AdamW state) into the freshly-initialised EGGROLL
+          state instead of using random init;
+        - replays stage 1's ``jax.random.split(rng, 3)`` chain off the
+          checkpoint's ``seed`` so ``train_val_split`` recovers the same
+          held-out transitions stage 1 used for validation;
+        - suppresses the pre-training val-MSE log at step 0 (stage 1 already
+          recorded that boundary point);
+        - offsets the W&B step axis by ``ckpt["update_steps_completed"]`` so
+          the two runs stitch into a continuous x-axis. Work counters
+          (``transitions_seen``, ``forward_evals``) are NOT offset — they
+          measure local-this-run EGGROLL work.
         """
         group_size = int(cfg.eggroll.group_size)
         assert group_size >= 0, f"group_size must be non-negative (got {cfg.eggroll.group_size})"
@@ -218,11 +233,38 @@ class EGGROLLEnsemble(EnsembleDynamics):
             f"(got {full_validation_interval})"
         )
 
-        # Allocate all keys up front
-        rng, split_rng, init_rng, es_rng = jax.random.split(rng, 4)
+        # Optional warm-start from a stage-1 MLEDynamicsNet checkpoint (issue #30).
+        # When set, params (and optionally the AdamW state) are loaded after
+        # init_eggroll_state below, and the train/val partition is replayed from
+        # the checkpoint's seed + validation_split.
+        init_ckpt_path = cfg.get("init_checkpoint", None)
+        reset_optax = bool(cfg.get("reset_optax_state", False))
+        ckpt: dict | None = None
+        step_offset: int = 0
+        if init_ckpt_path is not None:
+            import pickle
+
+            with open(init_ckpt_path, "rb") as f:
+                ckpt = pickle.load(f)
+            assert ckpt is not None  # narrow for Pyright
+            step_offset = int(ckpt["update_steps_completed"])
+
+        # Allocate all keys up front. When warm-starting, replay the stage-1
+        # split chain (jax.random.split(rng, 3) on jax.random.key(seed)) so
+        # `split_rng` recovers the same train/val partition as stage 1. DO NOT
+        # REORDER — see MLEDynamicsNet.train and tests/test_world_models.py
+        # ::TestHybridHandoff::test_val_set_parity.
+        if ckpt is not None:
+            stage1_root = jax.random.key(int(ckpt["seed"]))
+            _, split_rng, _ = jax.random.split(stage1_root, 3)
+            val_split = float(ckpt["validation_split"])
+            rng, init_rng, es_rng = jax.random.split(rng, 3)
+        else:
+            rng, split_rng, init_rng, es_rng = jax.random.split(rng, 4)
+            val_split = float(cfg.validation_split)
 
         # Split into train / val partitions
-        train_data, val_data = train_val_split(dataset, cfg.validation_split, split_rng)
+        train_data, val_data = train_val_split(dataset, val_split, split_rng)
 
         # Targets: (delta_obs, reward) — matches DynamicsNet output convention
         def _targets(data: Transition) -> jnp.ndarray:
@@ -261,7 +303,25 @@ class EGGROLLEnsemble(EnsembleDynamics):
             use_batched_update=bool(cfg.eggroll.get("use_batched_update", False)),
         )
 
-        if log_fn is not None:
+        # Splice the stage-1 params (and optionally the AdamW state) into the
+        # freshly-initialised EGGROLL state. `init_eggroll_state` has already
+        # built an `opt_state` of the matching shape against `common_init.params`;
+        # we just overwrite the values when `reset_optax_state` is False.
+        if ckpt is not None:
+            assert jax.tree.structure(state.params) == jax.tree.structure(ckpt["params"]), (
+                "init_checkpoint params pytree structure does not match the configured "
+                "DynamicsNet — check hidden_dims / activation / init_scheme match between "
+                "stage-1 and stage-2 cfgs."
+            )
+            state = state._replace(params=ckpt["params"])
+            if not reset_optax:
+                state = state._replace(
+                    noiser_params={**state.noiser_params, "opt_state": ckpt["opt_state"]}
+                )
+
+        # Skip the pre-training val-MSE log when warm-starting: stage 1 already
+        # logged that boundary point at its own final update_step.
+        if log_fn is not None and ckpt is None:
             init_val_means, _ = jax.vmap(
                 lambda o, a: DynamicsNet.forward(
                     EggRoll,
@@ -347,16 +407,20 @@ class EGGROLLEnsemble(EnsembleDynamics):
                 should_full_validate = (epoch == 0) | (step % full_validation_interval == 0)
 
                 def _log_train_callback(step_i, train_loss_i) -> None:
-                    step_py = int(step_i)
+                    # `step_i` is the local-this-run step (epoch + 1). Work
+                    # counters measure this-run work and use it directly; the
+                    # W&B step axis is offset by stage-1 update_steps_completed
+                    # so the two runs stitch into a single x-axis.
+                    local_step = int(step_i)
                     transitions_seen, forward_evals = _eggroll_work_counters(
-                        step_py,
+                        local_step,
                         n_prompts,
                         pop,
                         n_val,
                         full_validation_interval,
                     )
                     _log_fn(
-                        step_py,
+                        local_step + step_offset,
                         float(train_loss_i),
                         float("nan"),
                         transitions_seen,
@@ -371,16 +435,16 @@ class EGGROLLEnsemble(EnsembleDynamics):
                     )
 
                 def _log_val_callback(step_i, train_loss_i, val_mse_i) -> None:
-                    step_py = int(step_i)
+                    local_step = int(step_i)
                     transitions_seen, forward_evals = _eggroll_work_counters(
-                        step_py,
+                        local_step,
                         n_prompts,
                         pop,
                         n_val,
                         full_validation_interval,
                     )
                     _log_fn(
-                        step_py,
+                        local_step + step_offset,
                         float(train_loss_i),
                         float(val_mse_i),
                         transitions_seen,

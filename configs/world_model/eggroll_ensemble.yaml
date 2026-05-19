@@ -20,3 +20,11 @@ eggroll:
   sigma_decay_rate: 0.999995
   lr: 3e-4
   use_batched_update: true
+
+# Optional warm-start from a stage-1 MLEDynamicsNet checkpoint (issue #30).
+# When set, params are loaded from the checkpoint and (unless reset_optax_state
+# is true) the AdamW state is carried over. Validation split + seed are also
+# replayed from the checkpoint so val MSE is computed on the same held-out
+# transitions as stage 1.
+init_checkpoint: null
+reset_optax_state: false

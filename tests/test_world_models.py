@@ -1,6 +1,7 @@
 """Tests for world model training methods."""
 
 import pickle
+from unittest.mock import patch
 
 import jax
 import jax.numpy as jnp
@@ -8,9 +9,12 @@ import numpy as np
 from omegaconf import OmegaConf
 import pytest
 
-from mbrl.data import Transition
+from mbrl.data import DatasetInfo, Transition, train_val_split
+from mbrl.experiments import world_model as world_model_exp
+from mbrl.logger import Logger
 from mbrl.world_models.eggroll import EGGROLLEnsemble, _eggroll_work_counters
 from mbrl.world_models.mle import EnsembleDynamicsModel, MLEEnsemble
+from mbrl.world_models.mle_dynamicsnet import MLEDynamicsNet
 from mbrl.world_models.termination_fns import (
     get_termination_fn,
     termination_fn_halfcheetah,
@@ -490,3 +494,469 @@ class TestEGGROLLEnsembleCheckpoint:
         means_b, stds_b = reloaded.predict_ensemble(obs, action)
         assert jnp.allclose(means_a, means_b)
         assert jnp.allclose(stds_a, stds_b)
+
+
+# ---------------------------------------------------------------------------
+# MLEDynamicsNet tests
+# ---------------------------------------------------------------------------
+
+NUM_MLE_DYN_MEMBERS = 1
+
+MLE_DYN_FAST_CFG = OmegaConf.create(
+    {
+        "hidden_dims": [8, 8],
+        "activation": "relu",
+        "init_scheme": "eggroll",
+        "num_epochs": 5,
+        "batch_size": 32,
+        "lr": 1e-3,
+        "weight_decay": 1e-5,
+        "validation_split": 0.2,
+        "logvar_diff_coef": 0.01,
+        "max_logvar_init": 0.5,
+        "min_logvar_init": -10.0,
+        "num_members": NUM_MLE_DYN_MEMBERS,
+        "seed": 0,
+    }
+)
+
+
+@pytest.fixture(scope="module")
+def mle_dyn_trained(synthetic_dataset):
+    model = MLEDynamicsNet(
+        OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", MLE_DYN_FAST_CFG
+    )
+    model.train(synthetic_dataset, MLE_DYN_FAST_CFG, jax.random.key(0))
+    return model
+
+
+class TestMLEDynamicsNet:
+    def test_train_completes(self, synthetic_dataset):
+        model = MLEDynamicsNet(
+            OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", MLE_DYN_FAST_CFG
+        )
+        model.train(synthetic_dataset, MLE_DYN_FAST_CFG, jax.random.key(42))
+        assert model._params is not None
+        assert model._opt_state is not None
+        assert model._update_steps_completed > 0
+        assert model._validation_split == MLE_DYN_FAST_CFG.validation_split
+        assert model._seed == MLE_DYN_FAST_CFG.seed
+
+    def test_train_calls_log_fn(self, synthetic_dataset):
+        model = MLEDynamicsNet(
+            OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", MLE_DYN_FAST_CFG
+        )
+        log_calls: list[dict] = []
+
+        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals, epoch=None):
+            log_calls.append(
+                {
+                    "step": int(step),
+                    "epoch": None if epoch is None else int(epoch),
+                    "train_loss": float(train_loss),
+                    "val_mse": float(val_mse),
+                    "transitions_seen": int(transitions_seen),
+                    "forward_evals": int(forward_evals),
+                }
+            )
+
+        model.train(synthetic_dataset, MLE_DYN_FAST_CFG, jax.random.key(42), log_fn=log_fn)
+        jax.effects_barrier()
+
+        n_train = int((1 - MLE_DYN_FAST_CFG.validation_split) * N)
+        batches_per_epoch = n_train // MLE_DYN_FAST_CFG.batch_size
+
+        assert len(log_calls) == MLE_DYN_FAST_CFG.num_epochs + 1
+        assert [c["epoch"] for c in log_calls] == list(range(MLE_DYN_FAST_CFG.num_epochs + 1))
+        assert [c["step"] for c in log_calls] == [
+            epoch * batches_per_epoch for epoch in range(MLE_DYN_FAST_CFG.num_epochs + 1)
+        ]
+        assert np.isnan(log_calls[0]["train_loss"])
+        assert all(np.isfinite(c["val_mse"]) for c in log_calls)
+
+    def test_loss_decreases(self, synthetic_dataset):
+        # Use a longer-than-fast config so any noise in the smoke run averages out.
+        cfg = OmegaConf.create(
+            {**OmegaConf.to_container(MLE_DYN_FAST_CFG), "num_epochs": 30}  # type: ignore[arg-type]
+        )
+        model = MLEDynamicsNet(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        train_losses: list[float] = []
+
+        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals, epoch=None):
+            tl = float(train_loss)
+            if np.isfinite(tl):
+                train_losses.append(tl)
+
+        model.train(synthetic_dataset, cfg, jax.random.key(0), log_fn=log_fn)
+        jax.effects_barrier()
+
+        assert len(train_losses) >= 4
+        first_two = sum(train_losses[:2]) / 2
+        last_two = sum(train_losses[-2:]) / 2
+        assert last_two < first_two
+
+    def test_step_shapes(self, mle_dyn_trained):
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        next_obs, reward, done = mle_dyn_trained.step(obs, action, jax.random.key(0))
+        assert next_obs.shape == (OBS_DIM,)
+        assert reward.shape == ()
+        assert done.shape == ()
+
+    def test_predict_ensemble_shape(self, mle_dyn_trained):
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        means, stds = mle_dyn_trained.predict_ensemble(obs, action)
+        assert means.shape == (NUM_MLE_DYN_MEMBERS, OBS_DIM + 1)
+        assert stds.shape == (NUM_MLE_DYN_MEMBERS, OBS_DIM + 1)
+        assert jnp.all(jnp.isfinite(means))
+        assert jnp.all(jnp.isfinite(stds))
+
+    def test_determinism(self, synthetic_dataset):
+        model_a = MLEDynamicsNet(
+            OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", MLE_DYN_FAST_CFG
+        )
+        model_b = MLEDynamicsNet(
+            OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", MLE_DYN_FAST_CFG
+        )
+        model_a.train(synthetic_dataset, MLE_DYN_FAST_CFG, jax.random.key(123))
+        model_b.train(synthetic_dataset, MLE_DYN_FAST_CFG, jax.random.key(123))
+        leaves_a = jax.tree.leaves(model_a._params)
+        leaves_b = jax.tree.leaves(model_b._params)
+        assert len(leaves_a) == len(leaves_b)
+        for a, b in zip(leaves_a, leaves_b):
+            assert jnp.array_equal(a, b)
+
+    def test_checkpoint_roundtrip(self, mle_dyn_trained, tmp_path):
+        checkpoint = {
+            **mle_dyn_trained.checkpoint_state(),
+            "obs_dim": OBS_DIM,
+            "act_dim": ACT_DIM,
+            "dataset_id": "mujoco/halfcheetah/medium-v0",
+            "world_model_cfg": OmegaConf.to_container(MLE_DYN_FAST_CFG),
+            "wm_group": "test-group",
+        }
+        checkpoint_path = tmp_path / "world_model.pkl"
+        with open(checkpoint_path, "wb") as f:
+            pickle.dump(checkpoint, f)
+
+        reloaded = MLEDynamicsNet.load_from_checkpoint(checkpoint_path)
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        means_a, stds_a = mle_dyn_trained.predict_ensemble(obs, action)
+        means_b, stds_b = reloaded.predict_ensemble(obs, action)
+        assert jnp.allclose(means_a, means_b)
+        assert jnp.allclose(stds_a, stds_b)
+        assert reloaded._update_steps_completed == mle_dyn_trained._update_steps_completed
+        assert reloaded._validation_split == mle_dyn_trained._validation_split
+        assert reloaded._seed == mle_dyn_trained._seed
+
+
+# ---------------------------------------------------------------------------
+# Hybrid MLE→EGGROLL handoff tests (issue #30)
+# ---------------------------------------------------------------------------
+
+# Stage-2 EGGROLL config that matches MLE_DYN_FAST_CFG's network architecture
+# so the param pytrees line up. num_epochs=0 lets the splice tests inspect the
+# EGGROLL state immediately after init+splice without any training updates.
+HYBRID_EGGROLL_CFG = OmegaConf.create(
+    {
+        "num_members": NUM_EGGROLL_MEMBERS,
+        "hidden_dims": [8, 8],
+        "activation": "relu",
+        "init_scheme": "eggroll",
+        "num_epochs": 0,
+        "validation_split": 0.2,
+        "logvar_diff_coef": 0.01,
+        "log_interval": 1,
+        "full_validation_interval": 1,
+        "init_checkpoint": None,
+        "reset_optax_state": False,
+        "eggroll": {
+            "population_size": 8,
+            "group_size": 2,
+            "noise_reuse": 1,
+            "sigma": 0.01,
+            "sigma_decay_rate": 0.997,
+            "lr": 1e-3,
+            "solver": "adamw",
+            "solver_kwargs": {"weight_decay": 1e-5, "b1": 0.9},
+            "use_batched_update": True,
+        },
+    }
+)
+
+
+@pytest.fixture(scope="module")
+def stage1_checkpoint(synthetic_dataset, tmp_path_factory):
+    """Train a stage-1 MLEDynamicsNet and write a checkpoint to disk.
+
+    Returns ``(checkpoint_path, ckpt_dict, mle_model)``.
+    """
+    model = MLEDynamicsNet(
+        OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", MLE_DYN_FAST_CFG
+    )
+    model.train(synthetic_dataset, MLE_DYN_FAST_CFG, jax.random.key(0))
+
+    ckpt = {
+        **model.checkpoint_state(),
+        "obs_dim": OBS_DIM,
+        "act_dim": ACT_DIM,
+        "dataset_id": "mujoco/halfcheetah/medium-v0",
+        "world_model_cfg": OmegaConf.to_container(MLE_DYN_FAST_CFG),
+        "wm_group": "test-stage1",
+    }
+    path = tmp_path_factory.mktemp("stage1") / "world_model.pkl"
+    with open(path, "wb") as f:
+        pickle.dump(ckpt, f)
+
+    return path, ckpt, model
+
+
+def _stage2_cfg(init_checkpoint, reset_optax_state=False):
+    return OmegaConf.create(
+        {
+            **OmegaConf.to_container(HYBRID_EGGROLL_CFG),  # type: ignore[arg-type]
+            "init_checkpoint": str(init_checkpoint),
+            "reset_optax_state": reset_optax_state,
+        }
+    )
+
+
+class TestHybridHandoff:
+    def test_param_handoff(self, synthetic_dataset, stage1_checkpoint):
+        ckpt_path, ckpt, _ = stage1_checkpoint
+        cfg = _stage2_cfg(ckpt_path)
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        model.train(synthetic_dataset, cfg, jax.random.key(1))
+
+        # With num_epochs=0 the fori_loop is a no-op; state.params == ckpt["params"].
+        assert model._state is not None
+        spliced = jax.tree.leaves(model._state.params)
+        loaded = jax.tree.leaves(ckpt["params"])
+        assert len(spliced) == len(loaded)
+        for s, ld in zip(spliced, loaded):
+            assert jnp.array_equal(s, ld)
+
+    def test_optax_state_carryover(self, synthetic_dataset, stage1_checkpoint):
+        ckpt_path, ckpt, _ = stage1_checkpoint
+        cfg = _stage2_cfg(ckpt_path, reset_optax_state=False)
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        model.train(synthetic_dataset, cfg, jax.random.key(2))
+
+        assert model._state is not None
+        carried = jax.tree.leaves(model._state.noiser_params["opt_state"])
+        loaded = jax.tree.leaves(ckpt["opt_state"])
+        assert len(carried) == len(loaded)
+        for c, ld in zip(carried, loaded):
+            assert jnp.array_equal(c, ld)
+
+    def test_optax_state_reset(self, synthetic_dataset, stage1_checkpoint):
+        ckpt_path, ckpt, _ = stage1_checkpoint
+        cfg = _stage2_cfg(ckpt_path, reset_optax_state=True)
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        model.train(synthetic_dataset, cfg, jax.random.key(3))
+
+        assert model._state is not None
+        # Loaded state has count > 0 (stage 1 ran several update steps); the
+        # reset path leaves the freshly-initialised count at 0.
+        loaded_counts = [
+            int(c) for c in jax.tree.leaves(ckpt["opt_state"]) if jnp.asarray(c).shape == ()
+        ]
+        fresh_counts = [
+            int(c)
+            for c in jax.tree.leaves(model._state.noiser_params["opt_state"])
+            if jnp.asarray(c).shape == ()
+        ]
+        assert any(c > 0 for c in loaded_counts), "stage-1 ckpt should have a non-zero count"
+        assert all(c == 0 for c in fresh_counts), "reset path should re-init to count=0"
+
+    def test_logvar_bounds_preserved(self, synthetic_dataset, stage1_checkpoint):
+        ckpt_path, ckpt, _ = stage1_checkpoint
+        cfg = _stage2_cfg(ckpt_path)
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        model.train(synthetic_dataset, cfg, jax.random.key(4))
+
+        assert model._state is not None
+        assert jnp.array_equal(
+            model._state.params["max_logvar"], ckpt["params"]["max_logvar"]
+        )
+        assert jnp.array_equal(
+            model._state.params["min_logvar"], ckpt["params"]["min_logvar"]
+        )
+
+    def test_val_set_parity(self, synthetic_dataset, stage1_checkpoint):
+        """Stage 2's val partition must be bit-equal to stage 1's."""
+        _, ckpt, _ = stage1_checkpoint
+
+        # Recompute stage 1's val partition from the checkpoint's seed +
+        # validation_split. This is what stage 2 must reproduce.
+        stage1_root = jax.random.key(int(ckpt["seed"]))
+        _, split_rng_stage1, _ = jax.random.split(stage1_root, 3)
+        _, val_stage1 = train_val_split(
+            synthetic_dataset, ckpt["validation_split"], split_rng_stage1
+        )
+
+        # Capture the val partition stage-2 actually uses.
+        captured: dict = {}
+        original = train_val_split
+
+        def capturing(dataset, val_fraction, rng):
+            tr, va = original(dataset, val_fraction, rng)
+            captured["val"] = va
+            return tr, va
+
+        ckpt_path, _, _ = stage1_checkpoint
+        cfg = _stage2_cfg(ckpt_path)
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        with patch("mbrl.world_models.eggroll.train_val_split", capturing):
+            model.train(synthetic_dataset, cfg, jax.random.key(5))
+
+        assert "val" in captured
+        assert jnp.array_equal(captured["val"].obs, val_stage1.obs)
+        assert jnp.array_equal(captured["val"].action, val_stage1.action)
+        assert jnp.array_equal(captured["val"].next_obs, val_stage1.next_obs)
+        assert jnp.array_equal(captured["val"].reward, val_stage1.reward)
+
+    def test_dataset_id_mismatch_errors(self, synthetic_dataset, stage1_checkpoint, tmp_path):
+        """`experiments.world_model.run` rejects a checkpoint from a different dataset."""
+        _, ckpt, _ = stage1_checkpoint
+        bad_ckpt = {**ckpt, "dataset_id": "mujoco/hopper/medium-v0"}
+        bad_path = tmp_path / "bad_dataset.pkl"
+        with open(bad_path, "wb") as f:
+            pickle.dump(bad_ckpt, f)
+
+        run_cfg = OmegaConf.create(
+            {
+                "seed": 0,
+                "checkpoint_dir": str(tmp_path),
+                "wandb": {"enabled": False},
+                "dataset": {"name": "mujoco/halfcheetah/medium-v0"},
+                "world_model": _stage2_cfg(bad_path),
+            }
+        )
+        info = DatasetInfo(
+            obs_mean=jnp.zeros(OBS_DIM),
+            obs_std=jnp.ones(OBS_DIM),
+            obs_dim=OBS_DIM,
+            act_dim=ACT_DIM,
+            dataset_id="mujoco/halfcheetah/medium-v0",
+        )
+        logger = Logger(run_cfg)
+        with patch(
+            "mbrl.experiments.world_model.load_dataset",
+            return_value=(synthetic_dataset, info),
+        ):
+            with pytest.raises(ValueError, match="dataset_id mismatch"):
+                world_model_exp.run(run_cfg, logger)
+
+    def test_update_step_offset(self, synthetic_dataset, stage1_checkpoint):
+        """Stage 2 logs at update_step >= update_steps_completed + 1.
+
+        Also confirms the init val-MSE row at step 0 is suppressed (stage 1
+        already covered that boundary point) and that work counters
+        (transitions_seen, forward_evals) reset per run rather than carrying
+        the stage-1 values forward.
+        """
+        ckpt_path, ckpt, _ = stage1_checkpoint
+        cfg = OmegaConf.create(
+            {
+                **OmegaConf.to_container(HYBRID_EGGROLL_CFG),  # type: ignore[arg-type]
+                "init_checkpoint": str(ckpt_path),
+                "num_epochs": 3,
+                "log_interval": 1,
+                "full_validation_interval": 1,
+            }
+        )
+
+        log_calls: list[dict] = []
+
+        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals):
+            log_calls.append(
+                {
+                    "step": int(step),
+                    "train_loss": float(train_loss),
+                    "val_mse": float(val_mse),
+                    "transitions_seen": int(transitions_seen),
+                    "forward_evals": int(forward_evals),
+                }
+            )
+
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        model.train(synthetic_dataset, cfg, jax.random.key(11), log_fn=log_fn)
+        jax.effects_barrier()
+
+        offset = int(ckpt["update_steps_completed"])
+        assert offset > 0  # sanity: stage 1 actually trained
+
+        assert log_calls, "stage 2 should produce at least one log row"
+        # No row at step 0 — init val-MSE log is suppressed when warm-starting.
+        assert all(c["step"] > offset for c in log_calls), (
+            f"all stage-2 rows must sit at update_step > offset={offset}, "
+            f"got {[c['step'] for c in log_calls]}"
+        )
+        assert log_calls[0]["step"] == offset + 1
+        # Work counters reset per run: stage-2 transitions_seen at the first
+        # logged step is one prompt batch, not offset * batch_size.
+        assert log_calls[0]["transitions_seen"] < offset
+
+    def test_end_to_end_smoke(self, synthetic_dataset, stage1_checkpoint):
+        """Full Stage 1 → checkpoint → Stage 2 finetune → step() + predict_ensemble()."""
+        ckpt_path, _, _ = stage1_checkpoint
+        cfg = OmegaConf.create(
+            {
+                **OmegaConf.to_container(HYBRID_EGGROLL_CFG),  # type: ignore[arg-type]
+                "init_checkpoint": str(ckpt_path),
+                "num_epochs": 3,
+            }
+        )
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        model.train(synthetic_dataset, cfg, jax.random.key(20))
+
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+
+        next_obs, reward, done = model.step(obs, action, jax.random.key(21))
+        assert next_obs.shape == (OBS_DIM,)
+        assert reward.shape == ()
+        assert done.shape == ()
+        assert jnp.all(jnp.isfinite(next_obs))
+        assert jnp.isfinite(reward)
+
+        means, stds = model.predict_ensemble(obs, action)
+        assert means.shape == (NUM_EGGROLL_MEMBERS, OBS_DIM + 1)
+        assert stds.shape == (NUM_EGGROLL_MEMBERS, OBS_DIM + 1)
+        assert jnp.all(jnp.isfinite(means))
+        assert jnp.all(jnp.isfinite(stds))
+
+    def test_obs_act_dim_mismatch_errors(self, synthetic_dataset, stage1_checkpoint, tmp_path):
+        """`experiments.world_model.run` rejects a checkpoint with wrong obs/act dims."""
+        _, ckpt, _ = stage1_checkpoint
+        bad_ckpt = {**ckpt, "obs_dim": OBS_DIM + 1}
+        bad_path = tmp_path / "bad_dims.pkl"
+        with open(bad_path, "wb") as f:
+            pickle.dump(bad_ckpt, f)
+
+        run_cfg = OmegaConf.create(
+            {
+                "seed": 0,
+                "checkpoint_dir": str(tmp_path),
+                "wandb": {"enabled": False},
+                "dataset": {"name": "mujoco/halfcheetah/medium-v0"},
+                "world_model": _stage2_cfg(bad_path),
+            }
+        )
+        info = DatasetInfo(
+            obs_mean=jnp.zeros(OBS_DIM),
+            obs_std=jnp.ones(OBS_DIM),
+            obs_dim=OBS_DIM,
+            act_dim=ACT_DIM,
+            dataset_id="mujoco/halfcheetah/medium-v0",
+        )
+        logger = Logger(run_cfg)
+        with patch(
+            "mbrl.experiments.world_model.load_dataset",
+            return_value=(synthetic_dataset, info),
+        ):
+            with pytest.raises(ValueError, match="shape mismatch"):
+                world_model_exp.run(run_cfg, logger)
