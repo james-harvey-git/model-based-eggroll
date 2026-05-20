@@ -249,7 +249,7 @@ def main(cfg: DictConfig) -> None:
                 f"the world model with dataset={cfg.dataset.name.split('/')[-2]}."
             )
         wm_group = ckpt["wm_group"]
-    else:  # eval
+    elif stage == "eval":
         resolved_wm_ckpt, policy_dir, policy_ckpt, wm_group = _resolve_eval_inputs(
             base_checkpoint_dir,
             cfg.dataset.name,
@@ -266,6 +266,27 @@ def main(cfg: DictConfig) -> None:
         OmegaConf.update(cfg, "policy_checkpoint_dir", str(policy_dir))
         if "dataset_id" in policy_ckpt:
             OmegaConf.update(cfg, "dataset.name", policy_ckpt["dataset_id"])
+    elif stage == "wm_eval":
+        # Narrow resolution: do NOT use _find_latest_wm_for_dataset (which filters
+        # by training dataset == cfg.dataset.name — wrong predicate when the eval
+        # dataset differs from the training dataset by design).
+        wm_ckpt = base_checkpoint_dir / "world_model.pkl"
+        if not wm_ckpt.exists():
+            raise FileNotFoundError(
+                f"No world model checkpoint at '{wm_ckpt}'. "
+                f"Pass checkpoint_dir= pointing to a world-model run directory."
+            )
+        ckpt = _load_pickle(wm_ckpt)
+        wm_group = ckpt["wm_group"]
+        # Replace cfg.world_model with the checkpoint's recorded world_model_cfg so
+        # Logger auto-naming and auto-tagging reflect the trained model
+        # (e.g. an EGGROLL checkpoint shouldn't pick up the Hydra-default `mle`).
+        OmegaConf.update(cfg, "world_model", ckpt["world_model_cfg"], force_add=True)
+    else:
+        raise ValueError(
+            f"Unknown stage '{stage}'. Expected one of: "
+            "world_model, policy, eval, wm_eval, all."
+        )
 
     logger = Logger(cfg, wm_group=wm_group, timestamp=timestamp)
     try:
@@ -290,6 +311,8 @@ def main(cfg: DictConfig) -> None:
                     str(_find_latest_policy_run(policies_dir)),
                 )
             experiments.evaluate.run(cfg, logger)
+        if stage == "wm_eval":
+            experiments.wm_eval.run(cfg, logger)
     except Exception:
         logger.set_crashed_tag()
         raise

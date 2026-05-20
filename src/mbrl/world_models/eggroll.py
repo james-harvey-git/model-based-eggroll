@@ -147,6 +147,61 @@ class EGGROLLEnsemble(EnsembleDynamics):
         ensemble_std = jnp.exp(0.5 * logvars)
         return means, ensemble_std
 
+    def compute_val_mse(self, dataset: Transition) -> jax.Array:
+        """Unperturbed mean MSE over *dataset*, matching training-time ``val_mse``.
+
+        Mirrors the init-val computation in :meth:`train` (lines 325–340 below):
+        a single unperturbed forward through ``DynamicsNet`` (``iterinfo=None``)
+        — no population perturbations, no per-member aggregation. Iterates
+        contiguous chunks of size 1024 with an SSE/count accumulator so all N
+        transitions are covered (no shuffling, no tail-drop).
+        """
+        assert self._state is not None, "Must call train() before compute_val_mse()"
+        state = self._state
+        delta_obs = dataset.next_obs - dataset.obs
+        targets = jnp.concatenate([delta_obs, dataset.reward[:, None]], axis=-1)
+
+        @jax.jit
+        def _batch_sse(obs_b: jax.Array, action_b: jax.Array, bt: jax.Array) -> jax.Array:
+            means, _ = jax.vmap(
+                lambda o, a: DynamicsNet.forward(
+                    EggRoll,
+                    state.frozen_noiser_params,
+                    state.noiser_params,
+                    state.frozen_params,
+                    state.params,
+                    state.es_tree_key,
+                    None,
+                    o,
+                    a,
+                ),
+                in_axes=(0, 0),
+            )(obs_b, action_b)
+            return ((means - bt) ** 2).sum()
+
+        n = int(dataset.obs.shape[0])
+        batch_size = 1024
+        num_full = n // batch_size
+        sse = jnp.zeros((), dtype=jnp.float32)
+        if num_full > 0:
+            full_obs = dataset.obs[: num_full * batch_size].reshape(num_full, batch_size, -1)
+            full_action = dataset.action[: num_full * batch_size].reshape(
+                num_full, batch_size, -1
+            )
+            full_targets = targets[: num_full * batch_size].reshape(num_full, batch_size, -1)
+            sse, _ = jax.lax.scan(
+                lambda c, b: (c + _batch_sse(b[0], b[1], b[2]), None),
+                sse,
+                (full_obs, full_action, full_targets),
+            )
+        tail = n - num_full * batch_size
+        if tail > 0:
+            sse = sse + _batch_sse(
+                dataset.obs[-tail:], dataset.action[-tail:], targets[-tail:]
+            )
+        elements = n * int(targets.shape[1])
+        return sse / elements
+
     def step(
         self,
         obs: jnp.ndarray,

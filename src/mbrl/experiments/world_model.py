@@ -74,6 +74,7 @@ def run(cfg: DictConfig, logger: Logger) -> None:
         transitions_seen: int,
         forward_evals: int,
         epoch: int | None = None,
+        val_mse_elite: float | None = None,
     ) -> None:
         metrics: dict[str, float] = {}
         train_loss_f = float(train_loss)
@@ -82,6 +83,8 @@ def run(cfg: DictConfig, logger: Logger) -> None:
         val_mse_f = float(val_mse)
         if math.isfinite(val_mse_f):
             metrics["val_mse"] = val_mse_f
+        if val_mse_elite is not None and math.isfinite(val_mse_elite):
+            metrics["val_mse_elite"] = float(val_mse_elite)
         if epoch is not None:
             metrics["epoch"] = float(epoch)
         metrics["normalized_step"] = float(step) / max_step
