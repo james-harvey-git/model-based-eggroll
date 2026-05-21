@@ -86,6 +86,45 @@ def auto_tags(cfg: DictConfig) -> list[str]:
     return sorted(auto) + [t for t in manual if t not in auto]
 
 
+# Top-level config keys for W&B legend templates.
+_OPTIMIZER_MAP: dict[str, str] = {
+    "EGGROLLEnsemble": "eggroll",
+    "MLEEnsemble": "backprop",
+    "MLEDynamicsNet": "backprop",
+}
+
+_ARCH_MAP: dict[str, str] = {
+    "MLEEnsemble": "ensemble",
+    "MLEDynamicsNet": "single",
+}
+
+
+def _world_model_class_name(cfg: DictConfig) -> str:
+    target: str = cfg.world_model.get("_target_", "unknown")
+    return target.split(".")[-1]
+
+
+def _legend_fields(cfg: DictConfig) -> dict[str, str]:
+    """Flat top-level keys for W&B legend templates.
+
+    Adds ``optimizer`` (eggroll vs backprop), ``arch`` (ensemble vs single, for
+    backprop variants only) and ``backbone`` (mlp vs residual_mlp). Returns ``{}``
+    when ``cfg.world_model`` is absent.
+    """
+    if "world_model" not in cfg:
+        return {}
+    class_name = _world_model_class_name(cfg)
+    fields: dict[str, str] = {}
+    if class_name in _OPTIMIZER_MAP:
+        fields["optimizer"] = _OPTIMIZER_MAP[class_name]
+    if class_name in _ARCH_MAP:
+        fields["arch"] = _ARCH_MAP[class_name]
+    # MLEEnsemble has no `backbone` field (Flax SingleDynamicsModel is a flat MLP);
+    # the default correctly describes the static architecture there.
+    fields["backbone"] = str(cfg.world_model.get("backbone", "mlp"))
+    return fields
+
+
 def _is_sweep_run() -> bool:
     """Return True when running under a W&B sweep agent."""
     if os.environ.get("WANDB_SWEEP_ID") or os.environ.get("SWEEP_ID"):
@@ -114,6 +153,8 @@ class Logger:
         self.enabled: bool = wandb_cfg.get("enabled", False)  # type: ignore[union-attr]
         if self.enabled:
             name = wandb_cfg.get("name", None) or _auto_name(cfg, ts)  # type: ignore[union-attr]
+            config_dict = cast(dict[str, Any], OmegaConf.to_container(cfg, resolve=True))
+            config_dict.update(_legend_fields(cfg))
             wandb.init(
                 project="model-based-eggroll",
                 entity=wandb_cfg.get("entity", "model-based-eggroll"),  # type: ignore[union-attr]
@@ -121,7 +162,7 @@ class Logger:
                 job_type=cfg.get("stage", "all"),
                 name=name,
                 tags=auto_tags(cfg),
-                config=cast(dict[str, Any], OmegaConf.to_container(cfg, resolve=True)),
+                config=config_dict,
             )
 
     @classmethod
