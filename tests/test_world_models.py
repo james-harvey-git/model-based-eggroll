@@ -302,7 +302,7 @@ def eggroll_trained_slow(synthetic_dataset):
     model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", EGGROLL_SLOW_CFG)
     log_data: list[dict] = []
 
-    def log_fn(epoch, train_nll, val_mse, transitions_seen, forward_evals):
+    def log_fn(epoch, train_nll, val_mse, transitions_seen, forward_evals, **kwargs):
         val_mse_f = float(val_mse)
         if np.isfinite(val_mse_f):
             log_data.append(
@@ -462,7 +462,7 @@ class TestEGGROLLEnsembleTrain:
         )
         log_calls: list[dict] = []
 
-        def log_fn(epoch, train_loss, val_mse, transitions_seen, forward_evals):
+        def log_fn(epoch, train_loss, val_mse, transitions_seen, forward_evals, **kwargs):
             log_calls.append(
                 {
                     "epoch": int(epoch),
@@ -481,6 +481,116 @@ class TestEGGROLLEnsembleTrain:
             EGGROLL_UNGROUPED_CFG.eggroll.population_size * EGGROLL_UNGROUPED_CFG.num_epochs
         )
         assert np.isfinite(log_calls[-1]["train_loss"])
+
+    def test_trains_with_cosine_lr_schedule_and_sigma_decay(self, synthetic_dataset):
+        # lr schedule and sigma decay act on different regimes and must run in
+        # tandem: cosine anneals the optimiser step while sigma still decays.
+        cfg = OmegaConf.merge(
+            EGGROLL_FAST_CFG,
+            {
+                "eggroll": {
+                    "lr_schedule": "cosine",
+                    "lr_schedule_kwargs": {
+                        "decay_steps": EGGROLL_FAST_CFG.num_epochs,
+                        "alpha": 0.0,
+                    },
+                }
+            },
+        )
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        model.train(synthetic_dataset, cfg, jax.random.key(60))
+        jax.effects_barrier()
+
+        assert model._state is not None
+        # sigma still decays independently of the lr schedule
+        assert float(model._state.noiser_params["sigma"]) < float(cfg.eggroll.sigma)
+        # params stay finite after annealed training
+        leaves = jax.tree.leaves(model._state.params)
+        assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in leaves)
+
+    def test_warmstart_with_schedule_requires_reset_optax(self, synthetic_dataset):
+        # Non-constant schedule + warm-start without resetting optax state is
+        # rejected: the loaded stage-1 state has no schedule step counter.
+        cfg = OmegaConf.merge(
+            EGGROLL_FAST_CFG,
+            {
+                "init_checkpoint": "/nonexistent/stage1.pkl",
+                "reset_optax_state": False,
+                "eggroll": {
+                    "lr_schedule": "cosine",
+                    "lr_schedule_kwargs": {"decay_steps": 20},
+                },
+            },
+        )
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        with pytest.raises(ValueError, match="reset_optax_state=true"):
+            model.train(synthetic_dataset, cfg, jax.random.key(61))
+
+    def test_trains_with_cosine_sigma_schedule(self, synthetic_dataset):
+        # sigma can use a cosine schedule (with a floor) instead of the legacy
+        # geometric decay; it anneals toward alpha * sigma over decay_steps.
+        cfg = OmegaConf.merge(
+            EGGROLL_FAST_CFG,
+            {
+                "eggroll": {
+                    "sigma_schedule": "cosine",
+                    "sigma_schedule_kwargs": {
+                        "decay_steps": EGGROLL_FAST_CFG.num_epochs,
+                        "alpha": 0.1,
+                    },
+                }
+            },
+        )
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        model.train(synthetic_dataset, cfg, jax.random.key(62))
+        jax.effects_barrier()
+
+        assert model._state is not None
+        final_sigma = float(model._state.noiser_params["sigma"])
+        sigma0 = float(cfg.eggroll.sigma)
+        # floored at alpha * sigma0, and strictly below the initial sigma
+        assert sigma0 * 0.1 <= final_sigma < sigma0
+
+    def test_logs_lr_and_sigma_per_step(self, synthetic_dataset):
+        # lr and sigma are logged on every metric event so both are plottable
+        # against update steps and transitions seen; cosine lr and decaying sigma
+        # should both fall across logged steps.
+        cfg = OmegaConf.merge(
+            EGGROLL_FAST_CFG,
+            {
+                "eggroll": {
+                    "lr_schedule": "cosine",
+                    "lr_schedule_kwargs": {
+                        "decay_steps": EGGROLL_FAST_CFG.num_epochs,
+                        "alpha": 0.0,
+                    },
+                }
+            },
+        )
+        records: list[dict] = []
+
+        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals, lr=None, sigma=None):
+            records.append({"step": int(step), "lr": lr, "sigma": sigma})
+
+        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", cfg)
+        model.train(synthetic_dataset, cfg, jax.random.key(63), log_fn=log_fn)
+        jax.effects_barrier()
+
+        logged = [r for r in records if r["lr"] is not None]
+        assert logged, "no lr/sigma were logged"
+        assert all(np.isfinite(r["lr"]) and np.isfinite(r["sigma"]) for r in logged)
+        # cosine lr and sigma both anneal across the run
+        assert logged[-1]["lr"] < logged[0]["lr"]
+        assert logged[-1]["sigma"] < logged[0]["sigma"]
+
+    def test_sigma_decay_rate_backward_compatible_default(self, eggroll_trained_fast):
+        # Default path (only sigma_decay_rate set, no sigma_schedule) reproduces
+        # per-step geometric decay: the last-used sigma is sigma_0 * rate^(T-1).
+        final_sigma = float(eggroll_trained_fast._state.noiser_params["sigma"])
+        expected = EGGROLL_FAST_CFG.eggroll.sigma * (
+            EGGROLL_FAST_CFG.eggroll.sigma_decay_rate ** (EGGROLL_FAST_CFG.num_epochs - 1)
+        )
+        assert final_sigma == pytest.approx(expected, rel=1e-4)
 
 
 class TestEGGROLLEnsembleCheckpoint:
@@ -882,7 +992,7 @@ class TestHybridHandoff:
 
         log_calls: list[dict] = []
 
-        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals):
+        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals, **kwargs):
             log_calls.append(
                 {
                     "step": int(step),

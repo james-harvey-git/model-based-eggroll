@@ -50,11 +50,43 @@ def resolve_optax_solver(name: str) -> Any:
     return _OPTAX_SOLVERS[solver_name]
 
 
+def build_schedule(
+    init_value: float, name: str = "constant", schedule_kwargs: dict | None = None
+) -> float | optax.Schedule:
+    """Resolve an Optax schedule for EGGROLL updates (learning rate or sigma).
+
+    The schedule is a function of the update-step count (one per EGGROLL
+    generation). For ``lr`` the optax solver drives the count internally; for
+    ``sigma`` the caller evaluates it at the loop epoch. Returns a plain float
+    for ``"constant"``.
+
+    Args:
+        init_value: The schedule's ``init_value`` (start/peak) — e.g. ``lr`` or ``sigma``.
+        name: One of ``constant``, ``exponential``, ``cosine``, ``linear``.
+        schedule_kwargs: Optax kwargs forwarded to the schedule builder
+            (e.g. ``decay_steps``/``alpha`` for cosine; ``transition_steps``/
+            ``decay_rate``/``end_value`` for exponential).
+    """
+    name = name.lower()
+    kw = dict(schedule_kwargs or {})
+    if name == "constant":
+        return init_value
+    if name == "exponential":
+        return optax.exponential_decay(init_value=init_value, **kw)
+    if name == "cosine":
+        return optax.cosine_decay_schedule(init_value=init_value, **kw)
+    if name == "linear":
+        return optax.linear_schedule(init_value=init_value, **kw)
+    raise ValueError(
+        f"Unsupported schedule {name!r}. Supported: constant, exponential, cosine, linear"
+    )
+
+
 def init_eggroll_state(
     common_init: CommonInit,
     es_key: jax.Array,
     sigma: float,
-    lr: float,
+    lr: float | optax.Schedule,
     rank: int = 1,
     **eggroll_kwargs: Any,
 ) -> EGGROLLState:
@@ -66,7 +98,7 @@ def init_eggroll_state(
         es_key: JAX PRNG key used to generate the per-parameter tree of base
             keys (``es_tree_key``).
         sigma: Initial perturbation scale.
-        lr: Learning rate for the internal optax optimiser.
+        lr: Learning rate (float) or an optax schedule for the internal optimiser.
         rank: LoRA rank for weight-matrix perturbations (default 1).
         **eggroll_kwargs: Additional keyword arguments forwarded to
             ``EggRoll.init_noiser`` (e.g. ``group_size``, ``freeze_nonlora``,

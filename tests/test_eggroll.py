@@ -21,6 +21,7 @@ from mbrl.eggroll.networks import DynamicsNet, PolicyNet, ResidualMLP
 from mbrl.eggroll.primitives import MLP, EggRoll, Linear
 from mbrl.eggroll.training import (
     EGGROLLState,
+    build_schedule,
     eggroll_step,
     get_iterinfos,
     init_eggroll_state,
@@ -198,6 +199,19 @@ class TestInitEggrollState:
         )
         assert state.noiser_params["opt_state"] is not None
 
+    def test_accepts_lr_schedule(self):
+        model_key, es_key = jax.random.split(jax.random.key(4))
+        common_init = MLP.rand_init(
+            model_key, in_dim=4, out_dim=2, hidden_dims=[8],
+            use_bias=True, activation="relu", dtype="float32",
+        )
+        sched = build_schedule(1e-3, "cosine", {"decay_steps": 50})
+        state = init_eggroll_state(
+            common_init, es_key, sigma=0.05, lr=sched,
+            solver=resolve_optax_solver("adam"),
+        )
+        assert state.noiser_params["opt_state"] is not None
+
 
 class TestResolveOptaxSolver:
     def test_supported_solver_names(self):
@@ -211,6 +225,62 @@ class TestResolveOptaxSolver:
     def test_unknown_solver_raises(self):
         with pytest.raises(ValueError, match="Unsupported EGGROLL solver"):
             resolve_optax_solver("rmsprop")
+
+
+class TestBuildSchedule:
+    def test_constant_returns_plain_float(self):
+        # "constant" must return a float (not a Schedule) for zero overhead.
+        sched = build_schedule(3e-4, "constant")
+        assert isinstance(sched, float)
+        assert sched == pytest.approx(3e-4)
+
+    def test_constant_is_default(self):
+        assert build_schedule(1e-3) == pytest.approx(1e-3)
+
+    def test_cosine_anneals_init_to_alpha_fraction(self):
+        sched = build_schedule(3e-4, "cosine", {"decay_steps": 1000, "alpha": 0.01})
+        assert callable(sched)
+        assert float(sched(0)) == pytest.approx(3e-4, rel=1e-4)
+        assert float(sched(1000)) == pytest.approx(3e-4 * 0.01, rel=1e-3)
+        assert float(sched(0)) > float(sched(500)) > float(sched(1000))
+
+    def test_exponential_decays_to_end_value_floor(self):
+        sched = build_schedule(
+            1e-3, "exponential",
+            {"transition_steps": 1, "decay_rate": 0.99, "end_value": 1e-4},
+        )
+        assert float(sched(0)) == pytest.approx(1e-3, rel=1e-4)
+        assert float(sched(100)) < 1e-3
+        assert float(sched(100000)) == pytest.approx(1e-4, rel=1e-3)
+
+    def test_linear_reaches_end_value(self):
+        sched = build_schedule(1e-3, "linear", {"end_value": 0.0, "transition_steps": 100})
+        assert float(sched(0)) == pytest.approx(1e-3, rel=1e-4)
+        assert float(sched(100)) == pytest.approx(0.0, abs=1e-9)
+
+    def test_case_insensitive(self):
+        assert build_schedule(1e-3, "CONSTANT") == pytest.approx(1e-3)
+        assert callable(build_schedule(1e-3, "Cosine", {"decay_steps": 10}))
+
+    def test_unknown_schedule_raises(self):
+        with pytest.raises(ValueError, match="Unsupported schedule"):
+            build_schedule(1e-3, "warmup_magic")
+
+    def test_solver_update_count_drives_schedule(self):
+        # The optax solver's internal count advances the schedule. With SGD and
+        # a unit gradient, |update| == lr(count), so it must strictly decrease
+        # as a cosine anneals across successive update steps.
+        sched = build_schedule(1e-1, "cosine", {"decay_steps": 4, "alpha": 0.0})
+        opt = optax.sgd(sched)
+        params = jnp.zeros(())
+        state = opt.init(params)
+        grad = jnp.ones(())
+        mags = []
+        for _ in range(4):
+            updates, state = opt.update(grad, state, params)
+            mags.append(float(jnp.abs(updates)))
+        assert mags[0] == pytest.approx(1e-1, rel=1e-4)
+        assert mags[0] > mags[1] > mags[2] > mags[3]
 
 
 class TestGetIterinfos:

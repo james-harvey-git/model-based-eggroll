@@ -21,8 +21,12 @@ eggroll:
   solver_kwargs: {weight_decay: 1e-5, b1: 0.9}
   noise_reuse: 1        # fresh perturbation directions each epoch
   sigma: 0.02
-  sigma_decay_rate: 0.999995
+  sigma_decay_rate: 0.999995       # legacy shortcut: feeds the default exponential sigma_schedule
+  sigma_schedule: exponential      # constant | exponential | cosine | linear
+  sigma_schedule_kwargs: {}        # empty exponential => per-step decay at sigma_decay_rate (no floor)
   lr: 3e-4
+  lr_schedule: constant            # constant | exponential | cosine | linear
+  lr_schedule_kwargs: {}           # e.g. cosine: {decay_steps: 1250000, alpha: 0.01}
   use_batched_update: true
 
 # Optional warm-start from a stage-1 MLEDynamicsNet checkpoint (issue #30).
