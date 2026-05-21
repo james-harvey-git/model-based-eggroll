@@ -4,6 +4,7 @@ _target_: mbrl.world_models.mle_dynamicsnet.MLEDynamicsNet
 hidden_dims: [200, 200, 200, 200]
 activation: pqn
 init_scheme: eggroll
+backbone: mlp                  # "mlp" or "residual_mlp" — must match Stage 2.
 
 # Training
 num_epochs: 1000              # × (n_train // batch_size) = MLE update steps

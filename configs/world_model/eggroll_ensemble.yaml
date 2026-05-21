@@ -4,6 +4,10 @@ num_members: 7
 hidden_dims: [200, 200, 200, 200]
 activation: pqn
 init_scheme: eggroll
+# Backbone: "mlp" (default flat MLP, 5 Linear layers for the dims above) or
+# "residual_mlp" (pre-activation ResNet blocks; requires even-length, all-equal
+# hidden_dims — 2 blocks here, 6 Linear layers, so capacity is not param-matched).
+backbone: mlp
 num_epochs: 1250000
 validation_split: 0.2
 logvar_diff_coef: 0.01

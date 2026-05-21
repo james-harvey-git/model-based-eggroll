@@ -345,6 +345,7 @@ class EGGROLLEnsemble(EnsembleDynamics):
             hidden_dims=list(cfg.hidden_dims),
             activation=cfg.activation,
             init_scheme=str(cfg.get("init_scheme", "eggroll")),
+            backbone=str(cfg.get("backbone", "mlp")),
         )
         state = init_eggroll_state(
             common_init,
@@ -365,8 +366,8 @@ class EGGROLLEnsemble(EnsembleDynamics):
         if ckpt is not None:
             assert jax.tree.structure(state.params) == jax.tree.structure(ckpt["params"]), (
                 "init_checkpoint params pytree structure does not match the configured "
-                "DynamicsNet — check hidden_dims / activation / init_scheme match between "
-                "stage-1 and stage-2 cfgs."
+                "DynamicsNet — check hidden_dims / activation / init_scheme / backbone match "
+                "between stage-1 and stage-2 cfgs."
             )
             state = state._replace(params=ckpt["params"])
             if not reset_optax:

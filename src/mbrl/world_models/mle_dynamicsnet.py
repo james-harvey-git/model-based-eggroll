@@ -83,6 +83,7 @@ class MLEDynamicsNet(EnsembleDynamics):
             hidden_dims=list(wm_cfg.hidden_dims),
             activation=wm_cfg.activation,
             init_scheme=str(wm_cfg.get("init_scheme", "eggroll")),
+            backbone=str(wm_cfg.get("backbone", "mlp")),
             max_logvar_init=float(wm_cfg.get("max_logvar_init", 0.5)),
             min_logvar_init=float(wm_cfg.get("min_logvar_init", -10.0)),
         )
@@ -243,6 +244,7 @@ class MLEDynamicsNet(EnsembleDynamics):
             hidden_dims=list(cfg.hidden_dims),
             activation=cfg.activation,
             init_scheme=str(cfg.get("init_scheme", "eggroll")),
+            backbone=str(cfg.get("backbone", "mlp")),
             max_logvar_init=float(cfg.get("max_logvar_init", 0.5)),
             min_logvar_init=float(cfg.get("min_logvar_init", -10.0)),
         )

@@ -17,7 +17,7 @@ import jax.tree_util
 import optax
 import pytest
 
-from mbrl.eggroll.networks import DynamicsNet, PolicyNet
+from mbrl.eggroll.networks import DynamicsNet, PolicyNet, ResidualMLP
 from mbrl.eggroll.primitives import MLP, EggRoll, Linear
 from mbrl.eggroll.training import (
     EGGROLLState,
@@ -438,6 +438,186 @@ class TestDynamicsNet:
         )(iterinfos, obs, action)
         assert mean.shape == (num_envs, _OBS_DIM + 1)
         assert logvar.shape == (num_envs, _OBS_DIM + 1)
+
+    def test_residual_backbone_forward_shape(self):
+        key = jax.random.key(30)
+        init = DynamicsNet.rand_init(
+            key, _OBS_DIM, _ACT_DIM, _HIDDEN, backbone="residual_mlp"
+        )
+        # Param tree must still expose the same top-level keys so downstream code
+        # (warm-start splicing in EGGROLLEnsemble.train) is unaffected.
+        assert set(init.params.keys()) == {"backbone", "max_logvar", "min_logvar"}
+        assert init.frozen_params["backbone_type"] == "residual_mlp"
+        state = init_eggroll_state(init, key, sigma=0.1, lr=1e-3)
+        obs = jax.random.normal(key, (_OBS_DIM,))
+        action = jax.random.normal(key, (_ACT_DIM,))
+        mean, logvar = DynamicsNet.forward(
+            EggRoll,
+            state.frozen_noiser_params,
+            state.noiser_params,
+            state.frozen_params,
+            state.params,
+            state.es_tree_key,
+            None,
+            obs,
+            action,
+        )
+        assert mean.shape == (_OBS_DIM + 1,)
+        assert logvar.shape == (_OBS_DIM + 1,)
+        assert jnp.all(jnp.isfinite(mean))
+        assert jnp.all(jnp.isfinite(logvar))
+
+    def test_residual_backbone_logvar_clamped(self):
+        key = jax.random.key(31)
+        init = DynamicsNet.rand_init(
+            key, _OBS_DIM, _ACT_DIM, _HIDDEN,
+            backbone="residual_mlp",
+            max_logvar_init=0.5, min_logvar_init=-10.0,
+        )
+        state = init_eggroll_state(init, key, sigma=0.1, lr=1e-3)
+        obs = jax.random.normal(key, (_OBS_DIM,))
+        action = jax.random.normal(key, (_ACT_DIM,))
+        _, logvar = DynamicsNet.forward(
+            EggRoll,
+            state.frozen_noiser_params,
+            state.noiser_params,
+            state.frozen_params,
+            state.params,
+            state.es_tree_key,
+            None,
+            obs,
+            action,
+        )
+        assert jnp.all(logvar <= 0.5)
+        assert jnp.all(logvar >= -10.0)
+
+    def test_residual_backbone_forward_train_shape(self):
+        """Vmapped train-path forward (per-perturbation iterinfos) for residual backbone."""
+        num_envs = 8
+        key = jax.random.key(32)
+        init = DynamicsNet.rand_init(
+            key, _OBS_DIM, _ACT_DIM, _HIDDEN, backbone="residual_mlp"
+        )
+        state = init_eggroll_state(init, key, sigma=0.1, lr=1e-3)
+        iterinfos = get_iterinfos(epoch=0, num_envs=num_envs)
+        obs = jax.random.normal(key, (num_envs, _OBS_DIM))
+        action = jax.random.normal(key, (num_envs, _ACT_DIM))
+        mean, logvar = jax.vmap(
+            lambda iterinfo, o, a: DynamicsNet.forward(
+                EggRoll,
+                state.frozen_noiser_params,
+                state.noiser_params,
+                state.frozen_params,
+                state.params,
+                state.es_tree_key,
+                iterinfo,
+                o,
+                a,
+            ),
+            in_axes=(0, 0, 0),
+        )(iterinfos, obs, action)
+        assert mean.shape == (num_envs, _OBS_DIM + 1)
+        assert logvar.shape == (num_envs, _OBS_DIM + 1)
+        assert jnp.all(jnp.isfinite(mean))
+        assert jnp.all(jnp.isfinite(logvar))
+
+    def test_unknown_backbone_raises(self):
+        with pytest.raises(ValueError, match="Unknown backbone"):
+            DynamicsNet.rand_init(
+                jax.random.key(0), _OBS_DIM, _ACT_DIM, _HIDDEN, backbone="conv"
+            )
+
+    def test_old_checkpoint_frozen_params_defaults_to_mlp(self):
+        """Frozen_params without `backbone_type` (pre-residual checkpoints) must
+        still dispatch through the MLP branch — guards the .get() fallback in
+        _forward_with_bounds.
+        """
+        key = jax.random.key(30)
+        init = DynamicsNet.rand_init(key, _OBS_DIM, _ACT_DIM, _HIDDEN)
+        # Simulate an old checkpoint: strip the new backbone_type key.
+        stripped_frozen = {k: v for k, v in init.frozen_params.items() if k != "backbone_type"}
+        state = init_eggroll_state(init, key, sigma=0.1, lr=1e-3)
+        state = state._replace(frozen_params=stripped_frozen)
+        obs = jnp.zeros(_OBS_DIM)
+        action = jnp.zeros(_ACT_DIM)
+        mean, logvar = DynamicsNet.forward(
+            EggRoll,
+            state.frozen_noiser_params,
+            state.noiser_params,
+            state.frozen_params,
+            state.params,
+            state.es_tree_key,
+            None,
+            obs,
+            action,
+        )
+        assert mean.shape == (_OBS_DIM + 1,)
+        assert logvar.shape == (_OBS_DIM + 1,)
+
+
+# ── ResidualMLP ────────────────────────────────────────────────────────────────
+
+
+class TestResidualMLP:
+    def test_rand_init_structure(self):
+        init = ResidualMLP.rand_init(
+            jax.random.key(0),
+            in_dim=8,
+            out_dim=4,
+            hidden_dims=[16, 16, 16, 16],
+            use_bias=True,
+            activation="relu",
+            dtype="float32",
+        )
+        # Two blocks × 2 Linears + in_lin + out_lin = 6 Linear sub-modules.
+        expected = {"in_lin", "out_lin", "block_0_a", "block_0_b", "block_1_a", "block_1_b"}
+        assert set(init.params.keys()) == expected
+        assert init.frozen_params["num_blocks"] == 2
+        assert init.frozen_params["activation"] == "relu"
+
+    def test_forward_shape(self):
+        from mbrl.eggroll.primitives import EggRoll, simple_es_tree_key
+
+        key = jax.random.key(1)
+        init = ResidualMLP.rand_init(
+            key, in_dim=8, out_dim=4, hidden_dims=[16, 16, 16, 16],
+            use_bias=True, activation="relu", dtype="float32",
+        )
+        frozen_noiser_params, noiser_params = EggRoll.init_noiser(
+            init.params, sigma=0.0, lr=1e-3
+        )
+        es_tree_key = simple_es_tree_key(init.params, key, init.scan_map)
+        x = jax.random.normal(key, (8,))
+        out = ResidualMLP.forward(
+            EggRoll, frozen_noiser_params, noiser_params,
+            init.frozen_params, init.params, es_tree_key, None, x,
+        )
+        assert out.shape == (4,)
+        assert jnp.all(jnp.isfinite(out))
+
+    def test_odd_hidden_dims_rejected(self):
+        with pytest.raises(AssertionError, match="even number"):
+            ResidualMLP.rand_init(
+                jax.random.key(0), in_dim=8, out_dim=4,
+                hidden_dims=[16, 16, 16],
+                use_bias=True, activation="relu", dtype="float32",
+            )
+
+    def test_unequal_hidden_dims_rejected(self):
+        with pytest.raises(AssertionError, match="all hidden_dims equal"):
+            ResidualMLP.rand_init(
+                jax.random.key(0), in_dim=8, out_dim=4,
+                hidden_dims=[16, 32],
+                use_bias=True, activation="relu", dtype="float32",
+            )
+
+    def test_empty_hidden_dims_rejected(self):
+        with pytest.raises(AssertionError, match="non-empty"):
+            ResidualMLP.rand_init(
+                jax.random.key(0), in_dim=8, out_dim=4,
+                hidden_dims=[],
+                use_bias=True, activation="relu", dtype="float32",
+            )
 
 
 # ── PolicyNet ──────────────────────────────────────────────────────────────────
