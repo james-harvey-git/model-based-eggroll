@@ -1,0 +1,86 @@
+# EGGROLL world-model sweep over (sigma, lr) and cosine-schedule shape.
+#
+# Sweeps six HPs: the EGGROLL perturbation scale (sigma) and step size (lr),
+# plus the (decay_steps, alpha) pair of the sigma cosine schedule and the
+# (decay_steps, alpha) pair of the lr cosine schedule. Everything else is pinned
+# to the reference config (residual_mlp backbone, sgd solver, group_size=256,
+# num_epochs=62500, both schedules cosine).
+#
+# Reference values being swept around (from the reference config):
+#   sigma: 0.05    sigma_schedule_kwargs: {decay_steps: 937500,  alpha: 0.7}
+#   lr:    0.1     lr_schedule_kwargs:    {decay_steps: 6250000, alpha: 0.1}
+#
+# NOTE on decay_steps scale: num_epochs=62500 is the focused window, not the
+# nominal schedule horizon — by ~1e6 update steps MLE training already gaps
+# EGGROLL, so training targets this early window. The reference decay_steps
+# (937500, 6250000) are deliberately >> the window so the cosine decays gently
+# within it (near-constant sigma/lr). The ranges below bracket those references;
+# the low end reaches toward the window where the cosine descends to its alpha
+# floor within training. Tighten/shift once you know which regime helps.
+#
+# Usage:
+#   uv run python scripts/init_sweep.py \
+#       configs/sweep/eggroll_wm_halfcheetah_schedule.yaml
+#   # -> prints: Sweep ID: <SWEEP_ID>
+#   RUNS_PER_GPU=12 SWEEP_ID=<SWEEP_ID> \
+#       sbatch --array=0-3 scripts/run_eggroll_wm_schedule_sweep_eit.slurm
+
+program: scripts/sweep_world_model.py
+method: random
+run_cap: 96
+metric:
+  name: world_model/val_mse
+  goal: minimize
+early_terminate:
+  type: hyperband
+  min_iter: 10000
+  eta: 3
+  s: 2
+parameters:
+  # ── Pinned architecture / batching / budget (match the reference config) ─────
+  population_size:
+    value: 4096
+  group_size:
+    value: 256
+  solver:
+    value: sgd
+  backbone:
+    value: residual_mlp
+  num_epochs:
+    value: 62500
+  sigma_schedule:
+    value: cosine
+  lr_schedule:
+    value: cosine
+
+  # ── Swept: EGGROLL perturbation scale + step size ────────────────────────────
+  sigma:
+    distribution: log_uniform_values
+    min: 0.01         # geometric centre of [0.01, 0.2] is ~0.045 (ref 0.05)
+    max: 0.2
+  lr:
+    distribution: log_uniform_values
+    min: 0.02         # geometric centre of [0.02, 0.5] is ~0.1 (ref 0.1)
+    max: 0.5
+
+  # ── Swept: sigma cosine schedule shape ───────────────────────────────────────
+  sigma_decay_steps:
+    distribution: q_log_uniform_values
+    min: 31250        # 0.5x horizon — reaches alpha floor before training ends
+    max: 1000000      # ~16x horizon — near-constant (brackets reference 937500)
+    q: 1
+  sigma_alpha:
+    distribution: uniform
+    min: 0.1          # decays to 10% of sigma
+    max: 0.95         # decays to 95% of sigma (near-constant; ref 0.7)
+
+  # ── Swept: lr cosine schedule shape ──────────────────────────────────────────
+  lr_decay_steps:
+    distribution: q_log_uniform_values
+    min: 31250        # 0.5x horizon — reaches alpha floor before training ends
+    max: 6250000      # 100x horizon — near-constant (brackets reference 6250000)
+    q: 1
+  lr_alpha:
+    distribution: log_uniform_values
+    min: 0.01         # decays to 1% of lr
+    max: 0.9          # decays to 90% of lr (near-constant); ref 0.1
