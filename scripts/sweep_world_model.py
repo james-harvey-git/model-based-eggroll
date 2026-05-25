@@ -53,13 +53,21 @@ def compose_config(overrides: dict | None = None) -> DictConfig:
         mapping = {
             "population_size": "world_model.eggroll.population_size",
             "group_size": "world_model.eggroll.group_size",
+            "solver": "world_model.eggroll.solver",
             "weight_decay": "world_model.eggroll.solver_kwargs.weight_decay",
             "b1": "world_model.eggroll.solver_kwargs.b1",
             "sigma": "world_model.eggroll.sigma",
             "sigma_decay_rate": "world_model.eggroll.sigma_decay_rate",
+            "sigma_schedule": "world_model.eggroll.sigma_schedule",
+            "sigma_decay_steps": "world_model.eggroll.sigma_schedule_kwargs.decay_steps",
+            "sigma_alpha": "world_model.eggroll.sigma_schedule_kwargs.alpha",
             "lr": "world_model.eggroll.lr",
+            "lr_schedule": "world_model.eggroll.lr_schedule",
+            "lr_decay_steps": "world_model.eggroll.lr_schedule_kwargs.decay_steps",
+            "lr_alpha": "world_model.eggroll.lr_schedule_kwargs.alpha",
             "num_epochs": "world_model.num_epochs",
             "full_validation_interval": "world_model.full_validation_interval",
+            "backbone": "world_model.backbone",
             "activation": "world_model.activation",
             "init_checkpoint": "world_model.init_checkpoint",
             "reset_optax_state": "world_model.reset_optax_state",
@@ -67,6 +75,17 @@ def compose_config(overrides: dict | None = None) -> DictConfig:
         for key, path in mapping.items():
             if key in overrides:
                 OmegaConf.update(base, path, overrides[key], force_add=True)
+
+        # The base config carries AdamW solver_kwargs (weight_decay, b1) which
+        # optax.sgd (and other non-AdamW solvers) reject. Drop them unless the
+        # resolved solver is adamw and the sweep did not set them explicitly.
+        # (A future non-adamw sweep that *does* set weight_decay/b1 would skip
+        # this clear and inherit them — revisit the guard if that case arises.)
+        solver = str(base.world_model.eggroll.get("solver", "adamw")).lower()
+        if solver != "adamw" and not ({"weight_decay", "b1"} & set(overrides)):
+            OmegaConf.update(
+                base, "world_model.eggroll.solver_kwargs", {}, merge=False, force_add=True
+            )
 
     return base
 

@@ -216,7 +216,7 @@ class TestEGGROLLEnsembleRoundtrip:
     def test_compute_val_mse_matches_training_val_mse(self, synthetic_dataset, tmp_path):
         captured: list[float] = []
 
-        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals):
+        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals, **kwargs):
             if np.isfinite(val_mse):
                 captured.append(float(val_mse))
 

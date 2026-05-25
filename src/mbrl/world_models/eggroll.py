@@ -14,16 +14,19 @@ Rollout semantics:
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import jax
 import jax.numpy as jnp
 from omegaconf import DictConfig, OmegaConf
+import optax
 
 from mbrl.data import Transition, train_val_split
 from mbrl.eggroll.networks import DynamicsNet
 from mbrl.eggroll.primitives import EggRoll
 from mbrl.eggroll.training import (
     EGGROLLState,
+    build_schedule,
     get_iterinfos,
     init_eggroll_state,
     resolve_optax_solver,
@@ -294,6 +297,14 @@ class EGGROLLEnsemble(EnsembleDynamics):
         # the checkpoint's seed + validation_split.
         init_ckpt_path = cfg.get("init_checkpoint", None)
         reset_optax = bool(cfg.get("reset_optax_state", False))
+        lr_schedule_name = str(cfg.eggroll.get("lr_schedule", "constant"))
+        if init_ckpt_path is not None and not reset_optax and lr_schedule_name != "constant":
+            raise ValueError(
+                "Warm-starting (init_checkpoint set) with reset_optax_state=false and a "
+                f"non-constant lr_schedule ({lr_schedule_name!r}) is unsupported: the loaded "
+                "stage-1 optimiser state has no schedule step counter to resume from. "
+                "Set reset_optax_state=true to start the schedule from step 0."
+            )
         ckpt: dict | None = None
         step_offset: int = 0
         if init_ckpt_path is not None:
@@ -336,6 +347,37 @@ class EGGROLLEnsemble(EnsembleDynamics):
             if isinstance(solver_kwargs_cfg, DictConfig)
             else dict(solver_kwargs_cfg or {})
         )
+        lr_schedule_kwargs_cfg = cfg.eggroll.get("lr_schedule_kwargs", {})
+        lr_schedule_kwargs = (
+            OmegaConf.to_container(lr_schedule_kwargs_cfg, resolve=True)
+            if isinstance(lr_schedule_kwargs_cfg, DictConfig)
+            else dict(lr_schedule_kwargs_cfg or {})
+        )
+        lr_schedule = build_schedule(
+            float(cfg.eggroll.lr), lr_schedule_name, cast(dict, lr_schedule_kwargs)
+        )
+
+        # Sigma schedule, evaluated at the loop epoch each step. sigma_decay_rate
+        # is the backward-compatible shortcut: an unparameterised "exponential"
+        # schedule falls back to per-step geometric decay at that rate (no floor).
+        sigma_schedule_name = str(cfg.eggroll.get("sigma_schedule", "exponential"))
+        sigma_schedule_kwargs_cfg = cfg.eggroll.get("sigma_schedule_kwargs", {})
+        sigma_schedule_kwargs = (
+            OmegaConf.to_container(sigma_schedule_kwargs_cfg, resolve=True)
+            if isinstance(sigma_schedule_kwargs_cfg, DictConfig)
+            else dict(sigma_schedule_kwargs_cfg or {})
+        )
+        if sigma_schedule_name == "exponential" and not sigma_schedule_kwargs:
+            sigma_schedule_kwargs = {
+                "transition_steps": 1,
+                "decay_rate": float(cfg.eggroll.sigma_decay_rate),
+            }
+        _sigma_sched = build_schedule(
+            float(cfg.eggroll.sigma), sigma_schedule_name, cast(dict, sigma_schedule_kwargs)
+        )
+        sigma_schedule: optax.Schedule = (
+            _sigma_sched if callable(_sigma_sched) else optax.constant_schedule(_sigma_sched)
+        )
 
         # Initialise DynamicsNet + EGGROLL state
         common_init = DynamicsNet.rand_init(
@@ -345,12 +387,13 @@ class EGGROLLEnsemble(EnsembleDynamics):
             hidden_dims=list(cfg.hidden_dims),
             activation=cfg.activation,
             init_scheme=str(cfg.get("init_scheme", "eggroll")),
+            backbone=str(cfg.get("backbone", "mlp")),
         )
         state = init_eggroll_state(
             common_init,
             es_rng,
             sigma=float(cfg.eggroll.sigma),
-            lr=float(cfg.eggroll.lr),
+            lr=lr_schedule,
             group_size=int(cfg.eggroll.group_size),
             noise_reuse=int(cfg.eggroll.noise_reuse),
             solver=resolve_optax_solver(solver_name),
@@ -365,8 +408,8 @@ class EGGROLLEnsemble(EnsembleDynamics):
         if ckpt is not None:
             assert jax.tree.structure(state.params) == jax.tree.structure(ckpt["params"]), (
                 "init_checkpoint params pytree structure does not match the configured "
-                "DynamicsNet — check hidden_dims / activation / init_scheme match between "
-                "stage-1 and stage-2 cfgs."
+                "DynamicsNet — check hidden_dims / activation / init_scheme / backbone match "
+                "between stage-1 and stage-2 cfgs."
             )
             state = state._replace(params=ckpt["params"])
             if not reset_optax:
@@ -392,7 +435,13 @@ class EGGROLLEnsemble(EnsembleDynamics):
                 in_axes=(0, 0),
             )(val_data.obs, val_data.action)
             init_val_mse = jnp.mean((init_val_means - val_targets) ** 2)
-            log_fn(0, float("nan"), float(init_val_mse), 0, n_val)
+            lr0 = (
+                float(jnp.asarray(lr_schedule(0)))
+                if callable(lr_schedule)
+                else float(lr_schedule)
+            )
+            sigma0 = float(jnp.asarray(sigma_schedule(0)))
+            log_fn(0, float("nan"), float(init_val_mse), 0, n_val, lr=lr0, sigma=sigma0)
 
         # Static closures — captured once outside fori_loop.
         # frozen_noiser_params holds the optax solver (a Python callable) and cannot
@@ -403,13 +452,15 @@ class EGGROLLEnsemble(EnsembleDynamics):
         em = state.es_map
         pop = int(cfg.eggroll.population_size)
         n_prompts = pop if group_size == 0 else pop // group_size
-        sigma_decay = float(cfg.eggroll.sigma_decay_rate)
         log_interval = int(cfg.log_interval)
         logvar_diff_coef = float(cfg.get("logvar_diff_coef", 0.01))
         n_train = train_data.obs.shape[0]
 
         def train_epoch(epoch: int, carry: tuple) -> tuple:
             rng, noiser_params, params = carry
+            # sigma for this generation comes from the schedule (epoch-keyed),
+            # decoupled from and run in tandem with the lr schedule.
+            noiser_params = {**noiser_params, "sigma": sigma_schedule(epoch)}
             rng, batch_rng = jax.random.split(rng)
 
             # Sample training transitions with replacement. When group_size > 0,
@@ -447,9 +498,6 @@ class EGGROLLEnsemble(EnsembleDynamics):
                 fnp, dict(noiser_params), params, etk, normalized, iterinfos, em
             )
 
-            # Functional sigma decay — no in-place mutation on the traced carry dict
-            noiser_params = {**noiser_params, "sigma": noiser_params["sigma"] * sigma_decay}
-
             # Log train loss every log_interval and full-validation MSE after
             # the first training step (step 1) plus every
             # full_validation_interval thereafter. `if log_fn is not None`
@@ -460,8 +508,16 @@ class EGGROLLEnsemble(EnsembleDynamics):
                 train_loss = jnp.mean(losses)
                 step = epoch + 1
                 should_full_validate = (epoch == 0) | (step % full_validation_interval == 0)
+                # Current lr / sigma for this generation, logged alongside every
+                # metric so both are plottable vs update steps and transitions seen.
+                lr_value = (
+                    lr_schedule(epoch)
+                    if callable(lr_schedule)
+                    else jnp.asarray(lr_schedule, jnp.float32)
+                )
+                sigma_value = noiser_params["sigma"]
 
-                def _log_train_callback(step_i, train_loss_i) -> None:
+                def _log_train_callback(step_i, train_loss_i, lr_i, sigma_i) -> None:
                     # `step_i` is the local-this-run step (epoch + 1). Work
                     # counters measure this-run work and use it directly; the
                     # W&B step axis is offset by stage-1 update_steps_completed
@@ -480,6 +536,8 @@ class EGGROLLEnsemble(EnsembleDynamics):
                         float("nan"),
                         transitions_seen,
                         forward_evals,
+                        lr=float(lr_i),
+                        sigma=float(sigma_i),
                     )
 
                 def _log_train_only(_: None) -> None:
@@ -487,9 +545,11 @@ class EGGROLLEnsemble(EnsembleDynamics):
                         _log_train_callback,
                         step,
                         train_loss,
+                        lr_value,
+                        sigma_value,
                     )
 
-                def _log_val_callback(step_i, train_loss_i, val_mse_i) -> None:
+                def _log_val_callback(step_i, train_loss_i, val_mse_i, lr_i, sigma_i) -> None:
                     local_step = int(step_i)
                     transitions_seen, forward_evals = _eggroll_work_counters(
                         local_step,
@@ -504,6 +564,8 @@ class EGGROLLEnsemble(EnsembleDynamics):
                         float(val_mse_i),
                         transitions_seen,
                         forward_evals,
+                        lr=float(lr_i),
+                        sigma=float(sigma_i),
                     )
 
                 def _log_with_full_validation(_: None) -> None:
@@ -519,6 +581,8 @@ class EGGROLLEnsemble(EnsembleDynamics):
                         step,
                         train_loss,
                         val_mse,
+                        lr_value,
+                        sigma_value,
                     )
 
                 def _do_log(_: None) -> None:

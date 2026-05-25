@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from omegaconf import OmegaConf
 
-from mbrl.logger import Logger, _auto_name, auto_tags, make_wm_group
+from mbrl.logger import Logger, _auto_name, _legend_fields, auto_tags, make_wm_group
 
 BASE_CFG = {
     "seed": 0,
@@ -85,6 +85,43 @@ class TestAutoTags:
     def test_deduplication(self):
         cfg = OmegaConf.create({**BASE_CFG, "wandb": {"enabled": False, "tags": ["mle"]}})
         assert auto_tags(cfg).count("mle") == 1
+
+
+class TestLegendFields:
+    def test_mle_ensemble_is_backprop_ensemble(self):
+        cfg = OmegaConf.create(BASE_CFG)
+        fields = _legend_fields(cfg)
+        assert fields["optimizer"] == "backprop"
+        assert fields["arch"] == "ensemble"
+        assert fields["backbone"] == "mlp"
+
+    def test_mle_dynamicsnet_is_backprop_single(self):
+        cfg = OmegaConf.create(
+            {**BASE_CFG, "world_model": {
+                "_target_": "mbrl.world_models.mle_dynamicsnet.MLEDynamicsNet",
+                "backbone": "residual_mlp",
+            }}
+        )
+        fields = _legend_fields(cfg)
+        assert fields["optimizer"] == "backprop"
+        assert fields["arch"] == "single"
+        assert fields["backbone"] == "residual_mlp"
+
+    def test_eggroll_ensemble_has_optimizer_no_arch(self):
+        cfg = OmegaConf.create(
+            {**BASE_CFG, "world_model": {
+                "_target_": "mbrl.world_models.eggroll.EGGROLLEnsemble",
+                "backbone": "mlp",
+            }}
+        )
+        fields = _legend_fields(cfg)
+        assert fields["optimizer"] == "eggroll"
+        assert "arch" not in fields
+        assert fields["backbone"] == "mlp"
+
+    def test_returns_empty_without_world_model(self):
+        cfg = OmegaConf.create({k: v for k, v in BASE_CFG.items() if k != "world_model"})
+        assert _legend_fields(cfg) == {}
 
 
 class TestLoggerWmGroup:
