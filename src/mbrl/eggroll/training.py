@@ -45,7 +45,7 @@ def resolve_optax_solver(name: str) -> Any:
     if solver_name not in _OPTAX_SOLVERS:
         supported = ", ".join(sorted(_OPTAX_SOLVERS))
         raise ValueError(
-            f"Unsupported EGGROLL solver '{name}'. Supported solvers: {supported}"
+            f"Unsupported optax solver '{name}'. Supported solvers: {supported}"
         )
     return _OPTAX_SOLVERS[solver_name]
 

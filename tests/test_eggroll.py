@@ -223,7 +223,7 @@ class TestResolveOptaxSolver:
         assert resolve_optax_solver("AdamW") is optax.adamw
 
     def test_unknown_solver_raises(self):
-        with pytest.raises(ValueError, match="Unsupported EGGROLL solver"):
+        with pytest.raises(ValueError, match="Unsupported optax solver"):
             resolve_optax_solver("rmsprop")
 
 
