@@ -21,8 +21,20 @@ import optax
 from mbrl.data import Transition, create_epoch_iterator, train_val_split
 from mbrl.eggroll.networks import DynamicsNet
 from mbrl.eggroll.primitives import CommonParams, Noiser, simple_es_tree_key
+from mbrl.eggroll.training import resolve_optax_solver
 from mbrl.world_models.base import EnsembleDynamics
 from mbrl.world_models.termination_fns import get_termination_fn
+
+
+def _build_optimizer(cfg: DictConfig) -> optax.GradientTransformation:
+    """Construct the backprop optimiser from config.
+
+    ``cfg.optimizer`` selects the solver (sgd | adam | adamw, default adamw) and
+    ``cfg.optimizer_kwargs`` forwards solver-specific kwargs — e.g.
+    ``{weight_decay: 1e-5, eps: 1e-5}`` for adamw, ``{momentum: 0.9}`` for sgd.
+    """
+    solver = resolve_optax_solver(str(cfg.get("optimizer", "adamw")))
+    return solver(cfg.lr, **dict(cfg.get("optimizer_kwargs") or {}))
 
 
 def _mle_dyn_work_counters(
@@ -258,7 +270,7 @@ class MLEDynamicsNet(EnsembleDynamics):
         )
         params = common_init.params
 
-        tx = optax.adamw(cfg.lr, eps=1e-5, weight_decay=cfg.weight_decay)
+        tx = _build_optimizer(cfg)
         opt_state = tx.init(params)
 
         batch_size = int(cfg.batch_size)

@@ -10,7 +10,8 @@ backbone: mlp                  # "mlp" or "residual_mlp" — must match Stage 2.
 num_epochs: 1000              # × (n_train // batch_size) = MLE update steps
 batch_size: 256
 lr: 1e-3
-weight_decay: 1e-5
+optimizer: adamw              # sgd | adam | adamw
+optimizer_kwargs: {eps: 1e-5, weight_decay: 1e-5}  # solver-specific, e.g. {momentum: 0.9} for sgd
 validation_split: 0.2
 logvar_diff_coef: 0.01
 
