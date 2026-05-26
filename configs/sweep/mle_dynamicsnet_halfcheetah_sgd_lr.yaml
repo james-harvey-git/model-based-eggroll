@@ -1,0 +1,47 @@
+# MLEDynamicsNet (Stage-1) SGD learning-rate sweep on halfcheetah-medium.
+#
+# Sweeps a single axis: the SGD step size (lr). Everything else is pinned to the
+# mle_dynamicsnet reference config (mlp backbone, pqn activation), with the
+# optimiser forced to plain SGD (no momentum, no weight decay).
+#
+# NOTE on optimizer_kwargs: the base mle_dynamicsnet config ships AdamW-shaped
+# kwargs ({eps, weight_decay}) that optax.sgd rejects. sweep_mle_dynamicsnet.py
+# clears optimizer_kwargs automatically whenever the solver is not adamw and the
+# sweep sets no momentum/weight_decay — so plain SGD here needs no kwargs pinned.
+#
+# NOTE on budget: num_epochs=1, batch_size=1 → one epoch is a single pass of
+# ~n_train single-example SGD steps (one jax.lax.scan). val_mse is logged twice
+# (init at step 0, final at end of the epoch), so there is no intra-run metric
+# stream for hyperband to prune on — early_terminate is intentionally omitted.
+#
+# lr range is a broad exploratory bracket (geometric centre ~1e-3, matching the
+# AdamW reference lr); tighten once the stable regime for batch_size-1 SGD is
+# known.
+#
+# Usage:
+#   uv run python scripts/init_sweep.py \
+#       configs/sweep/mle_dynamicsnet_halfcheetah_sgd_lr.yaml
+#   # -> prints: Sweep ID: <SWEEP_ID>
+#   RUNS_PER_GPU=12 SWEEP_ID=<SWEEP_ID> \
+#       sbatch --array=0-3 scripts/run_mle_dynamicsnet_sgd_lr_sweep_eit.slurm
+
+program: scripts/sweep_mle_dynamicsnet.py
+method: random
+run_cap: 32
+metric:
+  name: world_model/val_mse
+  goal: minimize
+parameters:
+  # ── Pinned: optimiser / budget (match the reference config) ──────────────────
+  optimizer:
+    value: sgd
+  num_epochs:
+    value: 1
+  batch_size:
+    value: 1
+
+  # ── Swept: SGD learning rate ─────────────────────────────────────────────────
+  lr:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 1.0e-1
