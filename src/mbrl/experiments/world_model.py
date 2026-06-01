@@ -43,9 +43,9 @@ def run(cfg: DictConfig, logger: Logger) -> None:
             )
 
     # Plumb the top-level seed into cfg.world_model so per-class trainers that
-    # need a deterministic seed (e.g. MLEDynamicsNet, which records it in the
-    # checkpoint so Stage 2 can replay the train/val split) can read it from
-    # their own cfg without an extra constructor argument.
+    # need a deterministic seed (e.g. EnsembleMLP, which records it in the
+    # checkpoint so a fine-tune run can replay the train/val split) can read it
+    # from their own cfg without an extra constructor argument.
     if "seed" in cfg.world_model and cfg.world_model.seed is None:
         OmegaConf.set_struct(cfg.world_model, False)
         cfg.world_model.seed = int(cfg.seed)

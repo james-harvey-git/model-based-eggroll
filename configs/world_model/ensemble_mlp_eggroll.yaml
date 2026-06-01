@@ -11,6 +11,8 @@ backbone: mlp                      # mlp | residual_mlp
 num_epochs: 1250000
 validation_split: 0.2
 logvar_diff_coef: 0.01
+max_logvar_init: 0.5
+min_logvar_init: -10.0
 log_interval: 500
 full_validation_interval: 5000
 

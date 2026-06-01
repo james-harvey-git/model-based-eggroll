@@ -1,0 +1,181 @@
+"""Tests for the Unifloral baseline world model (UnifloralEnsembleMLP).
+
+The unified EnsembleMLP (backprop + eggroll trainers) is covered in
+test_ensemble_mlp.py; termination functions in test_termination_fns.py.
+"""
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+from omegaconf import OmegaConf
+import pytest
+
+from mbrl.data import Transition
+from mbrl.world_models.unifloral_ensemble_mlp import EnsembleDynamicsModel, UnifloralEnsembleMLP
+
+# Small dims for fast tests
+OBS_DIM = 4
+ACT_DIM = 2
+NUM_ENSEMBLE = 3
+NUM_ELITES = 2
+N = 200  # transitions
+
+FAST_CFG = OmegaConf.create(
+    {
+        "num_ensemble": NUM_ENSEMBLE,
+        "num_elites": NUM_ELITES,
+        "n_layers": 2,
+        "layer_size": 32,
+        "num_epochs": 5,
+        "lr": 1e-3,
+        "batch_size": 32,
+        "weight_decay": 2.5e-5,
+        "logvar_diff_coef": 0.01,
+        "validation_split": 0.2,
+    }
+)
+
+
+@pytest.fixture(scope="module")
+def synthetic_dataset():
+    rng = np.random.default_rng(0)
+    obs = jnp.array(rng.standard_normal((N, OBS_DIM)), dtype=jnp.float32)
+    action = jnp.array(rng.standard_normal((N, ACT_DIM)), dtype=jnp.float32)
+    reward = jnp.array(rng.standard_normal((N,)), dtype=jnp.float32)
+    next_obs = jnp.array(rng.standard_normal((N, OBS_DIM)), dtype=jnp.float32)
+    done = jnp.zeros((N,), dtype=jnp.float32)
+    return Transition(obs=obs, action=action, reward=reward, next_obs=next_obs, done=done)
+
+
+@pytest.fixture(scope="module")
+def trained_ensemble(synthetic_dataset):
+    model = UnifloralEnsembleMLP(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
+    model.train(synthetic_dataset, FAST_CFG, jax.random.key(0))
+    return model
+
+
+class TestEnsembleDynamicsModel:
+    def test_forward_pass_shape(self):
+        model = EnsembleDynamicsModel(
+            obs_dim=OBS_DIM,
+            action_dim=ACT_DIM,
+            num_ensemble=NUM_ENSEMBLE,
+            n_layers=2,
+            layer_size=32,
+        )
+        dummy_input = jnp.zeros(OBS_DIM + ACT_DIM)
+        params = model.init(jax.random.key(0), dummy_input)
+        mean, logvar = model.apply(params, dummy_input)
+        assert mean.shape == (NUM_ENSEMBLE, OBS_DIM + 1)
+        assert logvar.shape == (NUM_ENSEMBLE, OBS_DIM + 1)
+
+    def test_logvar_clamped(self):
+        model = EnsembleDynamicsModel(
+            obs_dim=OBS_DIM,
+            action_dim=ACT_DIM,
+            num_ensemble=NUM_ENSEMBLE,
+            n_layers=2,
+            layer_size=32,
+            max_logvar_init=0.5,
+            min_logvar_init=-10.0,
+        )
+        dummy_input = jnp.zeros(OBS_DIM + ACT_DIM)
+        params = model.init(jax.random.key(0), dummy_input)
+        _, logvar = model.apply(params, dummy_input)
+        # Soft clamp means values should be within a small margin of the init bounds
+        assert jnp.all(logvar <= 0.5 + 1.0)
+        assert jnp.all(logvar >= -10.0 - 1.0)
+
+
+class TestUnifloralEnsembleMLPTraining:
+    def test_train_calls_log_fn(self, synthetic_dataset):
+        model = UnifloralEnsembleMLP(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
+        log_calls: list[dict] = []
+
+        def log_fn(
+            step,
+            train_loss,
+            val_mse,
+            transitions_seen,
+            forward_evals,
+            epoch=None,
+            val_mse_elite=None,
+        ):
+            log_calls.append(
+                {
+                    "step": int(step),
+                    "epoch": None if epoch is None else int(epoch),
+                    "train_loss": float(train_loss),
+                    "val_mse": float(val_mse),
+                    "transitions_seen": int(transitions_seen),
+                    "forward_evals": int(forward_evals),
+                    "val_mse_elite": (
+                        None if val_mse_elite is None else float(val_mse_elite)
+                    ),
+                }
+            )
+
+        model.train(synthetic_dataset, FAST_CFG, jax.random.key(42), log_fn=log_fn)
+        jax.effects_barrier()  # flush async callbacks before asserting
+
+        n_train = int((1 - FAST_CFG.validation_split) * N)
+        batches_per_epoch = n_train // FAST_CFG.batch_size
+        train_examples_per_epoch = batches_per_epoch * FAST_CFG.batch_size
+        val_examples_per_epoch = (N - n_train) // FAST_CFG.batch_size
+        val_examples_per_epoch *= FAST_CFG.batch_size
+        forward_evals_per_epoch = (
+            train_examples_per_epoch + val_examples_per_epoch
+        ) * FAST_CFG.num_ensemble
+
+        assert len(log_calls) == FAST_CFG.num_epochs + 1
+        # epoch is the logical epoch counter; step is cumulative update steps
+        assert [c["epoch"] for c in log_calls] == list(range(FAST_CFG.num_epochs + 1))
+        assert [c["step"] for c in log_calls] == [
+            epoch * batches_per_epoch for epoch in range(FAST_CFG.num_epochs + 1)
+        ]
+        assert np.isnan(log_calls[0]["train_loss"])
+        assert all("train_loss" in c for c in log_calls)
+        assert all("val_mse" in c for c in log_calls)
+        assert [c["transitions_seen"] for c in log_calls] == [
+            0,
+            *[train_examples_per_epoch * i for i in range(1, FAST_CFG.num_epochs + 1)],
+        ]
+        assert [c["forward_evals"] for c in log_calls] == [
+            val_examples_per_epoch * FAST_CFG.num_ensemble,
+            *[
+                val_examples_per_epoch * FAST_CFG.num_ensemble + forward_evals_per_epoch * i
+                for i in range(1, FAST_CFG.num_epochs + 1)
+            ],
+        ]
+
+    def test_train_completes(self, synthetic_dataset):
+        model = UnifloralEnsembleMLP(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
+        model.train(synthetic_dataset, FAST_CFG, jax.random.key(42))
+        assert model.params is not None
+        assert model.num_elites == NUM_ELITES
+
+    def test_elite_selection(self, trained_ensemble):
+        assert trained_ensemble.num_elites == NUM_ELITES
+        # After pruning, ensemble axis 0 should equal num_elites
+        ensemble_params = trained_ensemble.params["params"]["ensemble"]
+        first_param = jax.tree.leaves(ensemble_params)[0]
+        assert first_param.shape[0] == NUM_ELITES
+
+
+class TestUnifloralEnsembleMLPStep:
+    def test_step_shapes(self, trained_ensemble):
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        next_obs, reward, done = trained_ensemble.step(obs, action, jax.random.key(0))
+        assert next_obs.shape == (OBS_DIM,)
+        assert reward.shape == ()
+        assert done.shape == ()
+
+    def test_step_determinism(self, trained_ensemble):
+        obs = jnp.zeros(OBS_DIM)
+        action = jnp.zeros(ACT_DIM)
+        out1 = trained_ensemble.step(obs, action, jax.random.key(7))
+        out2 = trained_ensemble.step(obs, action, jax.random.key(7))
+        out3 = trained_ensemble.step(obs, action, jax.random.key(8))
+        assert jnp.array_equal(out1[0], out2[0])
+        assert not jnp.array_equal(out1[0], out3[0])

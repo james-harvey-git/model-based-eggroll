@@ -7,8 +7,8 @@ Run a specific stage or the full pipeline via cfg.stage:
     uv run python src/mbrl/main.py stage=all  (default)
 
 Combine with config group overrides:
-    uv run python src/mbrl/main.py world_model=mle policy_optimizer=mopo
-    uv run python src/mbrl/main.py world_model=eggroll_ensemble policy_optimizer=eggroll
+    uv run python src/mbrl/main.py world_model=unifloral_ensemble_mlp policy_optimizer=mopo
+    uv run python src/mbrl/main.py world_model=ensemble_mlp_eggroll policy_optimizer=eggroll
 """
 
 from datetime import datetime

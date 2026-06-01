@@ -1,6 +1,7 @@
 """Tests for the unified EnsembleMLP world model (backprop + eggroll trainers)."""
 
 import pickle
+from unittest.mock import patch
 
 import jax
 import jax.numpy as jnp
@@ -8,7 +9,10 @@ import numpy as np
 from omegaconf import DictConfig, OmegaConf
 import pytest
 
-from mbrl.data import Transition
+from mbrl.data import DatasetInfo, Transition, derive_train_val_split
+from mbrl.experiments import world_model as world_model_exp
+from mbrl.logger import Logger
+import mbrl.world_models.ensemble_mlp as ensemble_mlp_mod
 from mbrl.world_models.ensemble_mlp import EnsembleMLP
 
 OBS_DIM = 4
@@ -38,6 +42,7 @@ def _backprop_cfg(**overrides) -> DictConfig:
         "num_epochs": 4, "batch_size": 32, "lr": 1e-3, "optimizer": "adamw",
         "optimizer_kwargs": {"eps": 1e-5, "weight_decay": 1e-5},
         "validation_split": 0.2, "logvar_diff_coef": 0.01,
+        "max_logvar_init": 0.5, "min_logvar_init": -10.0,
         "log_interval": 2, "full_validation_interval": 4, "seed": 0,
     }
     return OmegaConf.create({**base, **overrides})
@@ -48,6 +53,7 @@ def _eggroll_cfg(**overrides) -> DictConfig:
         "trainer": "eggroll", "num_ensemble": NUM_ENSEMBLE, "num_elites": NUM_ELITES,
         "hidden_dims": [8, 8], "activation": "relu", "init_scheme": "eggroll", "backbone": "mlp",
         "num_epochs": 15, "validation_split": 0.2, "logvar_diff_coef": 0.01,
+        "max_logvar_init": 0.5, "min_logvar_init": -10.0,
         "log_interval": 5, "full_validation_interval": 10, "use_shared_perturbations": False,
         "seed": 0,
         "eggroll": {
@@ -172,6 +178,143 @@ class TestEnsembleMLPCrossTrainerHandoff:
         cfg = _backprop_cfg(init_checkpoint=str(ckpt_path), reset_optax_state=True, num_epochs=3)
         model = _train(cfg, synthetic_dataset, 4)
         _assert_inference_ok(model)
+
+    def test_eggroll_to_eggroll(self, eggroll_model, synthetic_dataset, tmp_path):
+        ckpt_path = _write_ckpt(eggroll_model, _eggroll_cfg(), tmp_path)
+        cfg = _eggroll_cfg(init_checkpoint=str(ckpt_path), reset_optax_state=True, num_epochs=5)
+        model = _train(cfg, synthetic_dataset, 6)
+        _assert_inference_ok(model)
+
+    def test_logvar_bounds_preserved(self, backprop_model, synthetic_dataset, tmp_path):
+        """Warm-start loads the checkpoint params wholesale, so the learned
+        max/min_logvar bounds survive the handoff."""
+        ckpt_path = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        ckpt_max = backprop_model._params["max_logvar"]
+        ckpt_min = backprop_model._params["min_logvar"]
+        # num_epochs=0: the train loop is a no-op, so params == loaded checkpoint params.
+        cfg = _eggroll_cfg(init_checkpoint=str(ckpt_path), reset_optax_state=True, num_epochs=0)
+        model = _train(cfg, synthetic_dataset, 7)
+        assert jnp.array_equal(model._params["max_logvar"], ckpt_max)
+        assert jnp.array_equal(model._params["min_logvar"], ckpt_min)
+
+    def test_val_split_parity_on_finetune(self, backprop_model, synthetic_dataset, tmp_path):
+        """A fine-tune run reproduces the checkpoint's train/val split — keyed on the
+        checkpoint's (validation_split, seed), not the fine-tune cfg's."""
+        ckpt_path = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        # Checkpoint was trained with validation_split=0.2, seed=0.
+        _, expected_val = derive_train_val_split(synthetic_dataset, 0.2, 0)
+
+        captured: dict = {}
+        real = ensemble_mlp_mod.derive_train_val_split
+
+        def capturing(dataset, val_fraction, seed):
+            tr, va = real(dataset, val_fraction, seed)
+            captured["val"] = va
+            return tr, va
+
+        # Deliberately mismatched split knobs on the fine-tune cfg: the trainer must
+        # ignore these and use the checkpoint's (0.2, 0).
+        cfg = _backprop_cfg(
+            init_checkpoint=str(ckpt_path), reset_optax_state=True,
+            num_epochs=2, validation_split=0.4, seed=5,
+        )
+        with patch.object(ensemble_mlp_mod, "derive_train_val_split", capturing):
+            _train(cfg, synthetic_dataset, 8)
+
+        assert "val" in captured
+        assert jnp.array_equal(captured["val"].obs, expected_val.obs)
+        assert jnp.array_equal(captured["val"].next_obs, expected_val.next_obs)
+        assert jnp.array_equal(captured["val"].reward, expected_val.reward)
+
+
+def _opt_count(model) -> int:
+    """Largest scalar leaf in the optimiser state — the optax step counter."""
+    leaves = [jnp.asarray(c) for c in jax.tree.leaves(model._opt_state)]
+    scalars = [int(c) for c in leaves if c.ndim == 0]
+    return max(scalars) if scalars else 0
+
+
+class TestEnsembleMLPOptStateHandoff:
+    def test_same_solver_carries_optimiser_step(self, backprop_model, synthetic_dataset, tmp_path):
+        """Same-solver fine-tune (reset_optax_state=false) carries the optimiser step
+        counter forward; resetting starts it from zero."""
+        ckpt_path = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        carried = _train(
+            _backprop_cfg(init_checkpoint=str(ckpt_path), reset_optax_state=False, num_epochs=2),
+            synthetic_dataset, 5,
+        )
+        reset = _train(
+            _backprop_cfg(init_checkpoint=str(ckpt_path), reset_optax_state=True, num_epochs=2),
+            synthetic_dataset, 5,
+        )
+        assert _opt_count(carried) > _opt_count(reset)
+
+    def test_solver_mismatch_requires_reset(self, backprop_model, synthetic_dataset, tmp_path):
+        """An adamw checkpoint cannot carry into an sgd optimiser without a reset."""
+        ckpt_path = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        cfg = _backprop_cfg(
+            init_checkpoint=str(ckpt_path), reset_optax_state=False,
+            optimizer="sgd", optimizer_kwargs={}, num_epochs=1,
+        )
+        with pytest.raises(AssertionError, match="opt_state structure mismatch"):
+            _train(cfg, synthetic_dataset, 5)
+
+    def test_solver_mismatch_ok_with_reset(self, backprop_model, synthetic_dataset, tmp_path):
+        ckpt_path = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        cfg = _backprop_cfg(
+            init_checkpoint=str(ckpt_path), reset_optax_state=True,
+            optimizer="sgd", optimizer_kwargs={}, num_epochs=2,
+        )
+        _assert_inference_ok(_train(cfg, synthetic_dataset, 5))
+
+
+class TestEnsembleMLPEggrollConfig:
+    def test_invalid_group_size_raises(self, synthetic_dataset):
+        # group_size=3 is odd and does not divide population_size=8.
+        cfg = _eggroll_cfg(eggroll={"group_size": 3})
+        with pytest.raises(AssertionError):
+            _train(cfg, synthetic_dataset, 0)
+
+    def test_ungrouped_trains(self, synthetic_dataset):
+        # group_size=0 is the ungrouped path (one perturbation per population member).
+        _assert_inference_ok(_train(_eggroll_cfg(eggroll={"group_size": 0}), synthetic_dataset, 1))
+
+
+class TestEnsembleMLPWarmStartGuards:
+    """experiments.world_model.run rejects a fine-tune checkpoint from a different
+    dataset or with mismatched obs/act dims (guards are world-model-class agnostic)."""
+
+    def _run_with_ckpt(self, ckpt, synthetic_dataset, tmp_path):
+        path = tmp_path / "stage1.pkl"
+        with open(path, "wb") as f:
+            pickle.dump(ckpt, f)
+        run_cfg = OmegaConf.create({
+            "seed": 0,
+            "checkpoint_dir": str(tmp_path),
+            "wandb": {"enabled": False},
+            "dataset": {"name": DATASET_ID},
+            "world_model": _backprop_cfg(init_checkpoint=str(path)),
+        })
+        info = DatasetInfo(
+            obs_mean=jnp.zeros(OBS_DIM), obs_std=jnp.ones(OBS_DIM),
+            obs_dim=OBS_DIM, act_dim=ACT_DIM, dataset_id=DATASET_ID,
+        )
+        logger = Logger(run_cfg)
+        with patch(
+            "mbrl.experiments.world_model.load_dataset",
+            return_value=(synthetic_dataset, info),
+        ):
+            world_model_exp.run(run_cfg, logger)
+
+    def test_dataset_id_mismatch_errors(self, synthetic_dataset, tmp_path):
+        ckpt = {"dataset_id": "mujoco/hopper/medium-v0", "obs_dim": OBS_DIM, "act_dim": ACT_DIM}
+        with pytest.raises(ValueError, match="dataset_id mismatch"):
+            self._run_with_ckpt(ckpt, synthetic_dataset, tmp_path)
+
+    def test_dims_mismatch_errors(self, synthetic_dataset, tmp_path):
+        ckpt = {"dataset_id": DATASET_ID, "obs_dim": OBS_DIM + 1, "act_dim": ACT_DIM}
+        with pytest.raises(ValueError, match="shape mismatch"):
+            self._run_with_ckpt(ckpt, synthetic_dataset, tmp_path)
 
 
 def _write_ckpt(model, cfg, tmp_path):

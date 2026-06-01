@@ -515,7 +515,7 @@ class TestDynamicsNet:
             key, _OBS_DIM, _ACT_DIM, _HIDDEN, backbone="residual_mlp"
         )
         # Param tree must still expose the same top-level keys so downstream code
-        # (warm-start splicing in EGGROLLEnsemble.train) is unaffected.
+        # (warm-start splicing in EnsembleMLP) is unaffected.
         assert set(init.params.keys()) == {"backbone", "max_logvar", "min_logvar"}
         assert init.frozen_params["backbone_type"] == "residual_mlp"
         state = init_eggroll_state(init, key, sigma=0.1, lr=1e-3)

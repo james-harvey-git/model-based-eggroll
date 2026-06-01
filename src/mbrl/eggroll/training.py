@@ -2,7 +2,7 @@
 
 Provides state management, iterinfo generation, and the common
 convert_fitnesses + do_updates cycle shared by both world model training
-(mbrl.world_models.eggroll) and policy search (mbrl.policy_optimizers.eggroll).
+(mbrl.world_models.ensemble_mlp) and policy search (mbrl.policy_optimizers.eggroll).
 """
 
 from typing import Any, NamedTuple
