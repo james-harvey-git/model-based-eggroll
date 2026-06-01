@@ -190,6 +190,35 @@ class TestLoggerWmGroup:
         assert len(ts_part) == 15
 
 
+class TestFromExistingRun:
+    """from_existing_run (used by sweep agents) must apply the same legend fields,
+    provenance, and default step metric as __init__ on the already-init'd run."""
+
+    def _eggroll_cfg(self):
+        return OmegaConf.create({**BASE_CFG, "world_model": {
+            "_target_": "mbrl.world_models.ensemble_mlp.EnsembleMLP",
+            "trainer": "eggroll", "num_ensemble": 7,
+            "eggroll": {"lr": 3e-4, "population_size": 512, "sigma": 0.02, "group_size": 8},
+        }})
+
+    def test_applies_legend_and_metrics(self):
+        with patch("mbrl.logger.wandb") as mock_wandb:
+            mock_wandb.run = MagicMock()
+            logger = Logger.from_existing_run(self._eggroll_cfg(), wm_group="g")
+            assert logger.enabled and logger.wm_group == "g"
+            mock_wandb.config.update.assert_called_once()
+            sent = mock_wandb.config.update.call_args[0][0]
+            assert sent["trainer"] == "eggroll"
+            assert sent["population_size"] == 512
+            assert mock_wandb.define_metric.called
+
+    def test_finetune_lineage_none_without_init_checkpoint(self):
+        with patch("mbrl.logger.wandb") as mock_wandb:
+            mock_wandb.run = MagicMock()
+            logger = Logger.from_existing_run(self._eggroll_cfg())
+            assert logger.finetune_lineage is None
+
+
 class TestSetCrashedTag:
     def test_noop_when_disabled(self):
         cfg = OmegaConf.create({**BASE_CFG, "wandb": {"enabled": False, "tags": []}})

@@ -174,6 +174,14 @@ def _finetune_provenance(cfg: DictConfig) -> dict:
     }
 
 
+def _define_world_model_metrics() -> None:
+    """Default the world-model loss x-axis to transitions seen (data efficiency) so
+    backprop and eggroll runs overlay on a comparable axis rather than the update step."""
+    wandb.define_metric("world_model/transitions_seen")
+    for metric in ("world_model/val_mse", "world_model/val_mse_elite", "world_model/train_loss"):
+        wandb.define_metric(metric, step_metric="world_model/transitions_seen")
+
+
 def _is_sweep_run() -> bool:
     """Return True when running under a W&B sweep agent."""
     if os.environ.get("WANDB_SWEEP_ID") or os.environ.get("SWEEP_ID"):
@@ -219,23 +227,29 @@ class Logger:
                 tags=auto_tags(cfg),
                 config=config_dict,
             )
-            # Default the loss x-axis to transitions seen (data efficiency) so backprop
-            # and eggroll runs overlay on a comparable axis rather than the update step.
-            wandb.define_metric("world_model/transitions_seen")
-            for metric in ("world_model/val_mse", "world_model/val_mse_elite",
-                           "world_model/train_loss"):
-                wandb.define_metric(metric, step_metric="world_model/transitions_seen")
+            _define_world_model_metrics()
 
     @classmethod
-    def from_existing_run(cls, _cfg: DictConfig, wm_group: str | None = None) -> "Logger":
+    def from_existing_run(cls, cfg: DictConfig, wm_group: str | None = None) -> "Logger":
         """Create a Logger that attaches to an already-initialised W&B run.
 
         Used by sweep scripts where wandb.init() is called before Logger creation.
+        Applies the same legend fields, fine-tune provenance, and default step
+        metric as ``__init__`` so sweep and fine-tune-sweep runs are not missing
+        them on the agent-initialised run.
         """
         instance = cls.__new__(cls)
         instance.enabled = True
         instance.wm_group = wm_group or ""
-        instance.finetune_lineage = None
+        provenance = _finetune_provenance(cfg)
+        instance.finetune_lineage = provenance.get("finetune_lineage")
+        if wandb.run is not None:
+            # allow_val_change: legend keys (lr, population_size, ...) collide with
+            # the flat swept-param keys the sweep agent already set on the run.
+            wandb.config.update(
+                {**_legend_fields(cfg), **provenance}, allow_val_change=True
+            )
+            _define_world_model_metrics()
         return instance
 
     def finish(self) -> None:

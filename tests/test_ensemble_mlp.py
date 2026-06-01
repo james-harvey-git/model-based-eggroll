@@ -127,6 +127,19 @@ class TestEnsembleMLPBackprop:
     def test_checkpoint_roundtrip(self, backprop_model, tmp_path):
         _roundtrip(backprop_model, _backprop_cfg(), tmp_path)
 
+    def test_logs_lr(self, synthetic_dataset):
+        cfg = _backprop_cfg()
+        lrs: list[float] = []
+
+        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals, **kw):
+            if kw.get("lr") is not None:
+                lrs.append(float(kw["lr"]))
+
+        _train(cfg, synthetic_dataset, 0, log_fn=log_fn)
+        # Both trainers must log lr; backprop's is the constant cfg.lr.
+        assert lrs, "backprop logging never emitted lr"
+        assert all(np.isclose(v, float(cfg.lr)) for v in lrs)
+
 
 class TestEnsembleMLPEggroll:
     def test_train_completes(self, eggroll_model):
@@ -226,6 +239,19 @@ class TestEnsembleMLPCrossTrainerHandoff:
         assert jnp.array_equal(captured["val"].next_obs, expected_val.next_obs)
         assert jnp.array_equal(captured["val"].reward, expected_val.reward)
 
+    def test_finetune_records_source_split_seed(self, backprop_model, synthetic_dataset, tmp_path):
+        """A fine-tune checkpoint records the source checkpoint's split seed/fraction
+        (not the fine-tune cfg's), so a 2nd-gen fine-tune reproduces the same val split."""
+        ckpt_path = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)  # seed=0, split=0.2
+        cfg = _backprop_cfg(
+            init_checkpoint=str(ckpt_path), reset_optax_state=True,
+            num_epochs=2, seed=7, validation_split=0.4,
+        )
+        model = _train(cfg, synthetic_dataset, 8)
+        state = model.checkpoint_state()
+        assert state["seed"] == 0            # source split seed, not the fine-tune cfg seed 7
+        assert state["validation_split"] == 0.2  # source split fraction, not 0.4
+
 
 def _opt_count(model) -> int:
     """Largest scalar leaf in the optimiser state — the optax step counter."""
@@ -266,6 +292,17 @@ class TestEnsembleMLPOptStateHandoff:
             optimizer="sgd", optimizer_kwargs={}, num_epochs=2,
         )
         _assert_inference_ok(_train(cfg, synthetic_dataset, 5))
+
+    def test_num_ensemble_mismatch_raises(self, backprop_model, synthetic_dataset, tmp_path):
+        """init_checkpoint with a different num_ensemble is rejected — the param pytree
+        structure is identical across num_ensemble, so only the shape guard catches it."""
+        ckpt_path = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)  # num_ensemble=3
+        cfg = _backprop_cfg(
+            init_checkpoint=str(ckpt_path), reset_optax_state=True,
+            num_ensemble=5, num_elites=3, num_epochs=1,
+        )
+        with pytest.raises(ValueError, match="shape mismatch"):
+            _train(cfg, synthetic_dataset, 5)
 
 
 class TestEnsembleMLPEggrollConfig:

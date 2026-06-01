@@ -81,6 +81,28 @@ def _dynamics_init_kwargs(cfg: DictConfig, obs_dim: int, act_dim: int) -> dict:
     )
 
 
+def _assert_params_loadable(new_params, ckpt_params) -> None:
+    """Guard ``init_checkpoint`` params against an incompatible model.
+
+    ``jax.tree.structure`` alone misses ``num_ensemble`` and layer-width mismatches
+    (the leading axis is ``num_ensemble``; hidden widths are leaf shapes — both are
+    invisible to the structural comparison). Compare leaf shapes too.
+    """
+    if jax.tree.structure(new_params) != jax.tree.structure(ckpt_params):
+        raise ValueError(
+            "init_checkpoint params structure mismatch — check hidden_dims / "
+            "activation / init_scheme / backbone match the checkpoint."
+        )
+    new_shapes = [jnp.shape(x) for x in jax.tree.leaves(new_params)]
+    ckpt_shapes = [jnp.shape(x) for x in jax.tree.leaves(ckpt_params)]
+    if new_shapes != ckpt_shapes:
+        raise ValueError(
+            "init_checkpoint params shape mismatch — num_ensemble or layer widths "
+            "differ from the checkpoint. Match num_ensemble / hidden_dims to the "
+            "checkpoint, or start from scratch (drop init_checkpoint)."
+        )
+
+
 class EnsembleMLP(EnsembleDynamics):
     """Ensemble of `DynamicsNet` members trained by backprop or EGGROLL."""
 
@@ -255,12 +277,17 @@ class EnsembleMLP(EnsembleDynamics):
         else:
             self._train_eggroll(dataset, cfg, rng, int(seed), log_fn)
 
-    def _finalise(self, params, opt_state, val_data, steps_completed, val_split, seed) -> None:
+    def _finalise(
+        self, params, opt_state, val_data, steps_completed, val_split, split_seed
+    ) -> None:
         self._params = params
         self._opt_state = opt_state
         self._update_steps_completed = int(steps_completed)
         self._validation_split = float(val_split)
-        self._seed = int(seed)
+        # Persist the seed that actually determined the train/val split (the source
+        # checkpoint's seed when fine-tuning) so a later fine-tune reproduces the
+        # same split — not cfg.seed, which only drives the training RNG.
+        self._seed = int(split_seed)
         per_member = self._per_member_val_mse(
             params, val_data.obs, val_data.action, _targets(val_data)
         )
@@ -291,10 +318,7 @@ class EnsembleMLP(EnsembleDynamics):
 
         tx = _build_optimizer(cfg)
         if ckpt is not None:
-            assert jax.tree.structure(stacked_params) == jax.tree.structure(ckpt["params"]), (
-                "init_checkpoint params structure mismatch — check num_ensemble / hidden_dims "
-                "/ activation / init_scheme / backbone match the checkpoint."
-            )
+            _assert_params_loadable(stacked_params, ckpt["params"])
             stacked_params = ckpt["params"]
         opt_state = tx.init(stacked_params)
         if ckpt is not None and not reset_optax and ckpt.get("opt_state") is not None:
@@ -312,6 +336,7 @@ class EnsembleMLP(EnsembleDynamics):
         full_validation_interval = int(cfg.get("full_validation_interval", batches_per_epoch))
         n_val = val_obs.shape[0]
         num_elites = self.num_elites
+        lr_value = float(cfg.lr)  # constant backprop step size, logged for trainer parity
 
         def _loss_fn(params, obs_b, action_b, target_b):
             def per_member(pm):
@@ -341,7 +366,7 @@ class EnsembleMLP(EnsembleDynamics):
                 _emit_backprop_log(
                     log_fn, params, step, loss, val_obs, val_action, val_targets,
                     self._per_member_val_mse, n_ens, num_elites, batch_size, n_val,
-                    log_interval, full_validation_interval,
+                    log_interval, full_validation_interval, lr_value,
                 )
             return (params, opt_state, step), loss
 
@@ -351,7 +376,8 @@ class EnsembleMLP(EnsembleDynamics):
             )
             log_fn(
                 0, float("nan"), float(init_per_member.mean()), 0, n_val * n_ens,
-                epoch=0, val_mse_elite=float(jnp.sort(init_per_member)[:num_elites].mean()),
+                epoch=0, lr=lr_value,
+                val_mse_elite=float(jnp.sort(init_per_member)[:num_elites].mean()),
             )
 
         rng, shuffle_rng = jax.random.split(rng)
@@ -370,7 +396,7 @@ class EnsembleMLP(EnsembleDynamics):
         )
         self._finalise(
             params, opt_state, val_data, int(cfg.num_epochs) * batches_per_epoch,
-            val_split, seed,
+            val_split, split_seed,
         )
 
     # ---- eggroll trainer ----
@@ -448,10 +474,7 @@ class EnsembleMLP(EnsembleDynamics):
             es_axis = 0
 
         if ckpt is not None:
-            assert jax.tree.structure(stacked_params) == jax.tree.structure(ckpt["params"]), (
-                "init_checkpoint params structure mismatch — check num_ensemble / hidden_dims "
-                "/ activation / init_scheme / backbone match the checkpoint."
-            )
+            _assert_params_loadable(stacked_params, ckpt["params"])
             stacked_params = ckpt["params"]
             if not reset_optax and ckpt.get("opt_state") is not None:
                 assert jax.tree.structure(opt_state) == jax.tree.structure(ckpt["opt_state"]), (
@@ -528,7 +551,7 @@ class EnsembleMLP(EnsembleDynamics):
             0, int(cfg.num_epochs), train_epoch, (loop_rng, stacked_params, opt_state)
         )
         self._finalise(
-            params, opt_state, val_data, int(cfg.num_epochs), val_split, seed
+            params, opt_state, val_data, int(cfg.num_epochs), val_split, split_seed
         )
 
 
@@ -561,7 +584,7 @@ def _resolve_sigma_schedule(eg_cfg) -> optax.Schedule:
 def _emit_backprop_log(
     log_fn, params, step, train_loss, val_obs, val_action, val_targets,
     per_member_val_mse, n_ens, num_elites, batch_size, n_val,
-    log_interval, full_validation_interval,
+    log_interval, full_validation_interval, lr,
 ) -> None:
     should_validate = (step % full_validation_interval == 0)
     should_log = (step % log_interval == 0) | should_validate
@@ -574,13 +597,13 @@ def _emit_backprop_log(
 
     def _train_cb(step_i, loss_i) -> None:
         s = int(step_i)
-        log_fn(s, float(loss_i), float("nan"), _ts(s), _fe(s))
+        log_fn(s, float(loss_i), float("nan"), _ts(s), _fe(s), lr=lr)
 
     def _val_cb(step_i, loss_i, val_mse_i, val_elite_i) -> None:
         s = int(step_i)
         log_fn(
             s, float(loss_i), float(val_mse_i), _ts(s), _fe(s),
-            val_mse_elite=float(val_elite_i),
+            lr=lr, val_mse_elite=float(val_elite_i),
         )
 
     def _with_val(_):
