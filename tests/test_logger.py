@@ -219,6 +219,24 @@ class TestFromExistingRun:
             assert logger.finetune_lineage is None
 
 
+class TestLogPolicyStep:
+    def test_does_not_force_global_step(self):
+        """Policy logging must record policy/step as a field, not as W&B's global
+        step — otherwise a stage=all run drops every policy row as non-monotonic
+        against the world-model stage's millions-scale step."""
+        logger = Logger.__new__(Logger)
+        logger.enabled = True
+        with patch("mbrl.logger.wandb") as mock_wandb:
+            logger.log_policy_step(25000, critic_loss=0.5, raw_score=-100.0)
+            mock_wandb.log.assert_called_once()
+            args, kwargs = mock_wandb.log.call_args
+            assert "step" not in kwargs  # global step not forced
+            payload = args[0]
+            assert payload["policy/step"] == 25000
+            assert payload["policy/critic_loss"] == 0.5
+            assert payload["policy/raw_score"] == -100.0
+
+
 class TestSetCrashedTag:
     def test_noop_when_disabled(self):
         cfg = OmegaConf.create({**BASE_CFG, "wandb": {"enabled": False, "tags": []}})

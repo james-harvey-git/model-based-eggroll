@@ -174,12 +174,22 @@ def _finetune_provenance(cfg: DictConfig) -> dict:
     }
 
 
-def _define_world_model_metrics() -> None:
-    """Default the world-model loss x-axis to transitions seen (data efficiency) so
-    backprop and eggroll runs overlay on a comparable axis rather than the update step."""
+def _define_step_metrics() -> None:
+    """Give each stage its own x-axis. In a ``stage=all`` run the world-model and
+    policy stages share one W&B run but their step counts differ by orders of
+    magnitude (eggroll update steps reach millions; policy updates are far fewer).
+    Custom step metrics keep each stage on its own axis so neither forces W&B's
+    single global step — without which the later, lower-stepped stage's data is
+    rejected as non-monotonic and silently dropped.
+
+    World-model loss defaults to transitions seen (data efficiency) so backprop and
+    eggroll runs overlay on a comparable axis rather than the raw update step.
+    """
     wandb.define_metric("world_model/transitions_seen")
     for metric in ("world_model/val_mse", "world_model/val_mse_elite", "world_model/train_loss"):
         wandb.define_metric(metric, step_metric="world_model/transitions_seen")
+    wandb.define_metric("policy/step")
+    wandb.define_metric("policy/*", step_metric="policy/step")
 
 
 def _is_sweep_run() -> bool:
@@ -227,7 +237,7 @@ class Logger:
                 tags=auto_tags(cfg),
                 config=config_dict,
             )
-            _define_world_model_metrics()
+            _define_step_metrics()
 
     @classmethod
     def from_existing_run(cls, cfg: DictConfig, wm_group: str | None = None) -> "Logger":
@@ -249,7 +259,7 @@ class Logger:
             wandb.config.update(
                 {**_legend_fields(cfg), **provenance}, allow_val_change=True
             )
-            _define_world_model_metrics()
+            _define_step_metrics()
         return instance
 
     def finish(self) -> None:
@@ -272,10 +282,16 @@ class Logger:
         wandb.log({f"world_model/{k}": v for k, v in metrics.items()}, step=step)
 
     def log_policy_step(self, step: int, **metrics: float) -> None:
-        """Log policy training metrics (return, entropy, critic loss, etc.)."""
+        """Log policy training metrics (return, entropy, critic loss, etc.).
+
+        Logs ``step`` as the ``policy/step`` field (its custom step metric) rather
+        than forcing W&B's global step — so in a ``stage=all`` run the policy step
+        count (far smaller than eggroll's update step) is not rejected as
+        non-monotonic against the world-model stage's elevated global step.
+        """
         if not self.enabled:
             return
-        wandb.log({f"policy/{k}": v for k, v in metrics.items()}, step=step)
+        wandb.log({f"policy/{k}": v for k, v in metrics.items()} | {"policy/step": step})
 
     def log_eval(self, dataset_id: str, raw_score: float, normalized_score: float) -> None:
         """Log final evaluation results."""
