@@ -8,7 +8,7 @@
 # Examples:
 #   sbatch scripts/run_pipeline.slurm stage=all
 #   sbatch scripts/run_pipeline.slurm stage=world_model dataset=halfcheetah_medium seed=1
-#   sbatch scripts/run_pipeline.slurm stage=all world_model=mle policy_optimizer=mopo seed=42
+#   sbatch scripts/run_pipeline.slurm stage=all world_model=unifloral_ensemble_mlp policy_optimizer=mopo seed=42
 #
 # Any arguments are forwarded directly to Hydra as CLI overrides.
 # Submit from the model-based-eggroll/ directory.

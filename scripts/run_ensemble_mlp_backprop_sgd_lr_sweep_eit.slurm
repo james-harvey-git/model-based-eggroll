@@ -1,26 +1,26 @@
 #!/bin/bash
-# SLURM array job for the MLEDynamicsNet SGD learning-rate W&B sweep on the EIT
-# CDT cluster. Each trial trains a single DynamicsNet from scratch with plain
+# SLURM array job for the backprop EnsembleMLP SGD learning-rate W&B sweep on the
+# EIT CDT cluster. Each trial trains a backprop ensemble from scratch with plain
 # SGD and sweeps only the learning rate; all other knobs are pinned to the
 # reference config.
 #
 # Default sweep config:
-#   configs/sweep/mle_dynamicsnet_halfcheetah_sgd_lr.yaml
+#   configs/sweep/ensemble_mlp_backprop_halfcheetah_sgd_lr.yaml
 #   32 trials (run_cap), single lr axis, no early termination
 #
 # Usage:
 #   # 1. Register the sweep once from the repo root
 #   uv run python scripts/init_sweep.py \
-#       configs/sweep/mle_dynamicsnet_halfcheetah_sgd_lr.yaml
+#       configs/sweep/ensemble_mlp_backprop_halfcheetah_sgd_lr.yaml
 #   # → prints: Sweep ID: <SWEEP_ID>
 #
 #   # 2. Submit one array task per GPU you want to use total.
 #   #    Example: 4 GPUs total, 12 runs packed onto each GPU.
 #   RUNS_PER_GPU=12 SWEEP_ID=<SWEEP_ID> \
-#       sbatch --array=0-3 scripts/run_mle_dynamicsnet_sgd_lr_sweep_eit.slurm
+#       sbatch --array=0-3 scripts/run_ensemble_mlp_backprop_sgd_lr_sweep_eit.slurm
 
 # ── Job metadata ───────────────────────────────────────────────────────────────
-#SBATCH --job-name=mle-dynamicsnet-sgd-lr-sweep
+#SBATCH --job-name=ensemble-mlp-backprop-sgd-lr-sweep
 #SBATCH --partition=compute
 #SBATCH --time=08:00:00
 

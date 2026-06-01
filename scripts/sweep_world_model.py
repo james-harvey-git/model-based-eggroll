@@ -39,7 +39,7 @@ def compose_config(overrides: dict | None = None) -> DictConfig:
     OmegaConf.update(
         base,
         "world_model",
-        OmegaConf.load("configs/world_model/eggroll_ensemble.yaml"),
+        OmegaConf.load("configs/world_model/ensemble_mlp_eggroll.yaml"),
     )
     OmegaConf.update(base, "wandb.enabled", True)
     OmegaConf.update(base, "debug", False)

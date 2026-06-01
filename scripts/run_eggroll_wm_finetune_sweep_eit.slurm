@@ -1,6 +1,6 @@
 #!/bin/bash
 # SLURM array job for the EGGROLL finetune W&B sweep on the EIT CDT cluster.
-# Each trial warm-starts from a stage-1 MLEDynamicsNet checkpoint and sweeps
+# Each trial warm-starts from a stage-1 backprop EnsembleMLP checkpoint and sweeps
 # over (sigma, sigma_decay_rate, lr).
 #
 # Default sweep config:

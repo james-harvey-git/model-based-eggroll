@@ -1,11 +1,11 @@
-# MLEDynamicsNet (Stage-1) SGD learning-rate sweep on halfcheetah-medium.
+# Backprop EnsembleMLP SGD learning-rate sweep on halfcheetah-medium.
 #
 # Sweeps a single axis: the SGD step size (lr). Everything else is pinned to the
-# mle_dynamicsnet reference config (mlp backbone, pqn activation), with the
+# ensemble_mlp_backprop reference config (mlp backbone, pqn activation), with the
 # optimiser forced to plain SGD (no momentum, no weight decay).
 #
-# NOTE on optimizer_kwargs: the base mle_dynamicsnet config ships AdamW-shaped
-# kwargs ({eps, weight_decay}) that optax.sgd rejects. sweep_mle_dynamicsnet.py
+# NOTE on optimizer_kwargs: the base ensemble_mlp_backprop config ships AdamW-shaped
+# kwargs ({eps, weight_decay}) that optax.sgd rejects. sweep_ensemble_mlp_backprop.py
 # clears optimizer_kwargs automatically whenever the solver is not adamw and the
 # sweep sets no momentum/weight_decay — so plain SGD here needs no kwargs pinned.
 #
@@ -20,12 +20,12 @@
 #
 # Usage:
 #   uv run python scripts/init_sweep.py \
-#       configs/sweep/mle_dynamicsnet_halfcheetah_sgd_lr.yaml
+#       configs/sweep/ensemble_mlp_backprop_halfcheetah_sgd_lr.yaml
 #   # -> prints: Sweep ID: <SWEEP_ID>
 #   RUNS_PER_GPU=12 SWEEP_ID=<SWEEP_ID> \
-#       sbatch --array=0-3 scripts/run_mle_dynamicsnet_sgd_lr_sweep_eit.slurm
+#       sbatch --array=0-3 scripts/run_ensemble_mlp_backprop_sgd_lr_sweep_eit.slurm
 
-program: scripts/sweep_mle_dynamicsnet.py
+program: scripts/sweep_ensemble_mlp_backprop.py
 method: random
 run_cap: 32
 metric:
