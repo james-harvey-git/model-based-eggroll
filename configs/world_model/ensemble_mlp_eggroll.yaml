@@ -37,5 +37,5 @@ eggroll:
   use_batched_update: true
 
 init_checkpoint: null             # path to an EnsembleMLP checkpoint to fine-tune from
-reset_optax_state: false
+reset_optax_state: true
 seed: null                        # set from top-level cfg.seed by experiments/world_model.py

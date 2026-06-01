@@ -24,5 +24,5 @@ log_interval: 100
 full_validation_interval: 500
 
 init_checkpoint: null             # path to an EnsembleMLP checkpoint to fine-tune from
-reset_optax_state: false          # carry the optimiser state across fine-tuning unless true
+reset_optax_state: true          # carry the optimiser state across fine-tuning unless true
 seed: null                        # set from top-level cfg.seed by experiments/world_model.py
