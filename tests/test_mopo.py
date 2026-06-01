@@ -15,7 +15,7 @@ from mbrl.policy_optimizers.mopo import (
     train,
 )
 from mbrl.policy_optimizers.sac_n import AgentTrainState, create_agent_state, make_sac_update
-from mbrl.world_models.mle import MLEEnsemble
+from mbrl.world_models.unifloral_ensemble_mlp import UnifloralEnsembleMLP
 
 OBS_DIM = 4
 ACT_DIM = 2
@@ -69,7 +69,7 @@ def synthetic_dataset():
 
 @pytest.fixture(scope="module")
 def trained_world_model(synthetic_dataset):
-    model = MLEEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", WM_CFG)
+    model = UnifloralEnsembleMLP(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", WM_CFG)
     model.train(synthetic_dataset, WM_CFG, jax.random.key(0))
     return model
 

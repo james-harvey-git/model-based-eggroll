@@ -10,7 +10,9 @@ BASE_CFG = {
     "seed": 0,
     "stage": "all",
     "dataset": {"name": "mujoco/halfcheetah/medium-v0"},
-    "world_model": {"_target_": "mbrl.world_models.mle.MLEEnsemble"},
+    "world_model": {
+        "_target_": "mbrl.world_models.unifloral_ensemble_mlp.UnifloralEnsembleMLP"
+    },
     "policy_optimizer": {"_target_": "mbrl.policy_optimizers.mopo.train"},
     "wandb": {"enabled": False, "tags": []},
 }
@@ -21,25 +23,25 @@ class TestAutoName:
     def test_world_model_stage_excludes_algo(self):
         cfg = OmegaConf.create({**BASE_CFG, "stage": "world_model"})
         name = _auto_name(cfg, TS)
-        assert name == f"mle-halfcheetah-medium-s0-{TS}-wm"
+        assert name == f"unifloral-halfcheetah-medium-s0-{TS}-wm"
         assert "mopo" not in name
 
     def test_policy_stage_includes_algo(self):
         cfg = OmegaConf.create({**BASE_CFG, "stage": "policy"})
         name = _auto_name(cfg, TS)
-        assert name == f"mle-mopo-halfcheetah-medium-s0-{TS}-pol"
+        assert name == f"unifloral-mopo-halfcheetah-medium-s0-{TS}-pol"
 
     def test_all_stage_no_suffix(self):
         cfg = OmegaConf.create({**BASE_CFG, "stage": "all"})
         name = _auto_name(cfg, TS)
-        assert name == f"mle-mopo-halfcheetah-medium-s0-{TS}"
+        assert name == f"unifloral-mopo-halfcheetah-medium-s0-{TS}"
 
 
 class TestMakeWmGroup:
     def test_format(self):
         cfg = OmegaConf.create(BASE_CFG)
         group = make_wm_group(cfg, TS)
-        assert group == f"mle-halfcheetah-medium-s0-{TS}"
+        assert group == f"unifloral-halfcheetah-medium-s0-{TS}"
         assert "mopo" not in group
 
 
@@ -47,14 +49,14 @@ class TestAutoTags:
     def test_wm_stage_excludes_algo_tag(self):
         cfg = OmegaConf.create({**BASE_CFG, "stage": "world_model"})
         tags = auto_tags(cfg)
-        assert "mle" in tags
+        assert "unifloral" in tags
         assert "mopo" not in tags
         assert "halfcheetah-medium" in tags
 
     def test_policy_stage_includes_algo_tag(self):
         cfg = OmegaConf.create({**BASE_CFG, "stage": "policy"})
         tags = auto_tags(cfg)
-        assert "mle" in tags
+        assert "unifloral" in tags
         assert "mopo" in tags
 
     def test_sweep_tag_from_env(self, monkeypatch):
@@ -83,41 +85,90 @@ class TestAutoTags:
         assert "final" in auto_tags(cfg)
 
     def test_deduplication(self):
-        cfg = OmegaConf.create({**BASE_CFG, "wandb": {"enabled": False, "tags": ["mle"]}})
-        assert auto_tags(cfg).count("mle") == 1
+        cfg = OmegaConf.create({**BASE_CFG, "wandb": {"enabled": False, "tags": ["unifloral"]}})
+        assert auto_tags(cfg).count("unifloral") == 1
+
+    def test_finetune_tag_from_init_checkpoint(self):
+        cfg = OmegaConf.create(
+            {**BASE_CFG, "world_model": {
+                "_target_": "mbrl.world_models.ensemble_mlp.EnsembleMLP",
+                "trainer": "eggroll",
+                "init_checkpoint": "/tmp/some_ckpt.pkl",
+            }}
+        )
+        assert "finetune" in auto_tags(cfg)
+
+    def test_eggroll_indep_vs_shared_perturbation_tag(self):
+        indep = OmegaConf.create(
+            {**BASE_CFG, "world_model": {
+                "_target_": "mbrl.world_models.ensemble_mlp.EnsembleMLP",
+                "trainer": "eggroll",
+                "use_shared_perturbations": False,
+            }}
+        )
+        shared = OmegaConf.create(
+            {**BASE_CFG, "world_model": {
+                "_target_": "mbrl.world_models.ensemble_mlp.EnsembleMLP",
+                "trainer": "eggroll",
+                "use_shared_perturbations": True,
+            }}
+        )
+        assert "indep-pert" in auto_tags(indep)
+        assert "shared-pert" not in auto_tags(indep)
+        assert "shared-pert" in auto_tags(shared)
 
 
 class TestLegendFields:
-    def test_mle_ensemble_is_backprop_ensemble(self):
+    def test_unifloral_baseline_is_backprop_trainer(self):
         cfg = OmegaConf.create(BASE_CFG)
         fields = _legend_fields(cfg)
-        assert fields["optimizer"] == "backprop"
-        assert fields["arch"] == "ensemble"
+        assert fields["trainer"] == "backprop"
         assert fields["backbone"] == "mlp"
-
-    def test_mle_dynamicsnet_is_backprop_single(self):
-        cfg = OmegaConf.create(
-            {**BASE_CFG, "world_model": {
-                "_target_": "mbrl.world_models.mle_dynamicsnet.MLEDynamicsNet",
-                "backbone": "residual_mlp",
-            }}
-        )
-        fields = _legend_fields(cfg)
-        assert fields["optimizer"] == "backprop"
-        assert fields["arch"] == "single"
-        assert fields["backbone"] == "residual_mlp"
-
-    def test_eggroll_ensemble_has_optimizer_no_arch(self):
-        cfg = OmegaConf.create(
-            {**BASE_CFG, "world_model": {
-                "_target_": "mbrl.world_models.eggroll.EGGROLLEnsemble",
-                "backbone": "mlp",
-            }}
-        )
-        fields = _legend_fields(cfg)
-        assert fields["optimizer"] == "eggroll"
+        # The old taxonomy fields are gone.
         assert "arch" not in fields
-        assert fields["backbone"] == "mlp"
+        assert "optimizer" not in fields
+
+    def test_ensemble_mlp_backprop_trainer(self):
+        cfg = OmegaConf.create(
+            {**BASE_CFG, "world_model": {
+                "_target_": "mbrl.world_models.ensemble_mlp.EnsembleMLP",
+                "trainer": "backprop",
+                "num_ensemble": 7,
+                "num_elites": 5,
+                "batch_size": 256,
+                "lr": 1e-3,
+            }}
+        )
+        fields = _legend_fields(cfg)
+        assert fields["trainer"] == "backprop"
+        assert fields["num_ensemble"] == 7
+        assert fields["num_elites"] == 5
+        assert fields["batch_size"] == 256
+        assert "population_size" not in fields
+
+    def test_ensemble_mlp_eggroll_trainer_exposes_eggroll_fields(self):
+        cfg = OmegaConf.create(
+            {**BASE_CFG, "world_model": {
+                "_target_": "mbrl.world_models.ensemble_mlp.EnsembleMLP",
+                "trainer": "eggroll",
+                "backbone": "mlp",
+                "num_ensemble": 7,
+                "use_shared_perturbations": False,
+                "eggroll": {
+                    "lr": 0.05,
+                    "population_size": 512,
+                    "sigma": 0.02,
+                    "group_size": 64,
+                },
+            }}
+        )
+        fields = _legend_fields(cfg)
+        assert fields["trainer"] == "eggroll"
+        assert fields["population_size"] == 512
+        assert fields["sigma"] == 0.02
+        assert fields["group_size"] == 64
+        assert fields["use_shared_perturbations"] is False
+        assert "batch_size" not in fields
 
     def test_returns_empty_without_world_model(self):
         cfg = OmegaConf.create({k: v for k, v in BASE_CFG.items() if k != "world_model"})
@@ -127,13 +178,13 @@ class TestLegendFields:
 class TestLoggerWmGroup:
     def test_wm_group_stored_as_attribute(self):
         cfg = OmegaConf.create(BASE_CFG)
-        logger = Logger(cfg, wm_group="mle-halfcheetah-medium-s0-20260410-143022")
-        assert logger.wm_group == "mle-halfcheetah-medium-s0-20260410-143022"
+        logger = Logger(cfg, wm_group="unifloral-halfcheetah-medium-s0-20260410-143022")
+        assert logger.wm_group == "unifloral-halfcheetah-medium-s0-20260410-143022"
 
     def test_wm_group_auto_generated_when_not_provided(self):
         cfg = OmegaConf.create(BASE_CFG)
         logger = Logger(cfg)
-        assert logger.wm_group.startswith("mle-halfcheetah-medium-s0-")
+        assert logger.wm_group.startswith("unifloral-halfcheetah-medium-s0-")
         # Timestamp portion: YYYYMMDD-HHMMSS = 15 chars
         ts_part = logger.wm_group.split("-s0-", 1)[1]
         assert len(ts_part) == 15

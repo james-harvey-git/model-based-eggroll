@@ -13,7 +13,6 @@ from mbrl.data import DatasetInfo, Transition, train_val_split
 from mbrl.experiments import world_model as world_model_exp
 from mbrl.logger import Logger
 from mbrl.world_models.eggroll import EGGROLLEnsemble, _eggroll_work_counters
-from mbrl.world_models.mle import EnsembleDynamicsModel, MLEEnsemble
 from mbrl.world_models.mle_dynamicsnet import MLEDynamicsNet
 from mbrl.world_models.termination_fns import (
     get_termination_fn,
@@ -21,6 +20,7 @@ from mbrl.world_models.termination_fns import (
     termination_fn_hopper,
     termination_fn_walker2d,
 )
+from mbrl.world_models.unifloral_ensemble_mlp import EnsembleDynamicsModel, UnifloralEnsembleMLP
 
 # Small dims for fast tests
 OBS_DIM = 4
@@ -58,7 +58,7 @@ def synthetic_dataset():
 
 @pytest.fixture(scope="module")
 def trained_ensemble(synthetic_dataset):
-    model = MLEEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
+    model = UnifloralEnsembleMLP(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
     model.train(synthetic_dataset, FAST_CFG, jax.random.key(0))
     return model
 
@@ -98,7 +98,7 @@ class TestEnsembleDynamicsModel:
 
 class TestMLEEnsembleTraining:
     def test_train_calls_log_fn(self, synthetic_dataset):
-        model = MLEEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
+        model = UnifloralEnsembleMLP(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
         log_calls: list[dict] = []
 
         def log_fn(
@@ -158,7 +158,7 @@ class TestMLEEnsembleTraining:
         ]
 
     def test_train_completes(self, synthetic_dataset):
-        model = MLEEnsemble(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
+        model = UnifloralEnsembleMLP(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", FAST_CFG)
         model.train(synthetic_dataset, FAST_CFG, jax.random.key(42))
         assert model.params is not None
         assert model.num_elites == NUM_ELITES

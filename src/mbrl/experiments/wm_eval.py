@@ -1,35 +1,20 @@
 """World-model validation MSE on an arbitrary dataset.
 
 Loads a trained world-model checkpoint, loads any Minari dataset, and reports a
-single scalar matching that world model's training-time ``val_mse``
-(or ``val_mse_elite`` for :class:`MLEEnsemble`). Used to probe OOD robustness by
-evaluating a checkpoint trained on one behavioural-policy dataset against
-another (e.g. ``halfcheetah-medium`` checkpoint vs ``halfcheetah-expert`` data).
+single scalar matching that world model's training-time ``val_mse`` (or
+``val_mse_elite`` for ensembles). Used to probe OOD robustness by evaluating a
+checkpoint trained on one behavioural-policy dataset against another (e.g. a
+``halfcheetah-medium`` checkpoint vs ``halfcheetah-expert`` data).
 """
 
 from pathlib import Path
 import pickle
-from typing import Any
 
 from omegaconf import DictConfig
 
 from mbrl.data import load_dataset
 from mbrl.logger import Logger
-from mbrl.world_models.base import EnsembleDynamics
-from mbrl.world_models.eggroll import EGGROLLEnsemble
-from mbrl.world_models.mle import MLEEnsemble
-from mbrl.world_models.mle_dynamicsnet import MLEDynamicsNet
-
-
-def _load_world_model(ckpt_path: Path, ckpt: dict[str, Any]) -> EnsembleDynamics:
-    target: str = ckpt["world_model_cfg"]["_target_"]
-    if "MLEEnsemble" in target:
-        return MLEEnsemble.load_from_checkpoint(ckpt_path)
-    if "MLEDynamicsNet" in target:
-        return MLEDynamicsNet.load_from_checkpoint(ckpt_path)
-    if "EGGROLLEnsemble" in target:
-        return EGGROLLEnsemble.load_from_checkpoint(ckpt_path)
-    raise ValueError(f"Unrecognised world_model._target_ in checkpoint: {target!r}")
+from mbrl.world_models.base import load_world_model_from_checkpoint
 
 
 def run(cfg: DictConfig, logger: Logger) -> None:
@@ -54,7 +39,7 @@ def run(cfg: DictConfig, logger: Logger) -> None:
             f"obs/act=({info.obs_dim}, {info.act_dim}) for '{info.dataset_id}'."
         )
 
-    world_model = _load_world_model(ckpt_path, ckpt)
+    world_model = load_world_model_from_checkpoint(str(ckpt_path))
     val_mse = float(world_model.compute_val_mse(dataset))
 
     print(

@@ -23,8 +23,8 @@ from mbrl.data import Transition, train_val_split
 from mbrl.experiments import wm_eval
 from mbrl.logger import Logger
 from mbrl.world_models.eggroll import EGGROLLEnsemble
-from mbrl.world_models.mle import MLEEnsemble
 from mbrl.world_models.mle_dynamicsnet import MLEDynamicsNet
+from mbrl.world_models.unifloral_ensemble_mlp import UnifloralEnsembleMLP
 
 OBS_DIM = 4
 ACT_DIM = 2
@@ -33,7 +33,7 @@ BATCH_SIZE = 32  # divides n_val=32 cleanly → no tail-drop in training-time va
 
 MLE_CFG = OmegaConf.create(
     {
-        "_target_": "mbrl.world_models.mle.MLEEnsemble",
+        "_target_": "mbrl.world_models.unifloral_ensemble_mlp.UnifloralEnsembleMLP",
         "num_ensemble": 3,
         "num_elites": 2,
         "n_layers": 2,
@@ -110,7 +110,7 @@ def _disabled_logger() -> Logger:
     return Logger(cfg, wm_group="test-group", timestamp="20260101-000000")
 
 
-def _write_mle_checkpoint(model: MLEEnsemble, path) -> None:
+def _write_mle_checkpoint(model: UnifloralEnsembleMLP, path) -> None:
     ckpt = {
         "params": model.params,
         "num_elites": model.num_elites,
@@ -163,7 +163,7 @@ class TestMLEEnsembleRoundtrip:
                 captured.append(float(elite))
 
         rng_in = jax.random.key(7)
-        model = MLEEnsemble(OBS_DIM, ACT_DIM, DATASET_ID, MLE_CFG)
+        model = UnifloralEnsembleMLP(OBS_DIM, ACT_DIM, DATASET_ID, MLE_CFG)
         model.train(synthetic_dataset, MLE_CFG, rng_in, log_fn=log_fn)
 
         # Mirror train()'s rng chain: rng, split_rng, init_rng = jax.random.split(rng, 3).
@@ -175,7 +175,7 @@ class TestMLEEnsembleRoundtrip:
 
         ckpt_path = tmp_path / "world_model.pkl"
         _write_mle_checkpoint(model, ckpt_path)
-        reloaded = MLEEnsemble.load_from_checkpoint(ckpt_path)
+        reloaded = UnifloralEnsembleMLP.load_from_checkpoint(ckpt_path)
         reloaded_val_mse = float(reloaded.compute_val_mse(val_data))
 
         assert captured, "training never logged a finite val_mse_elite"
@@ -254,7 +254,7 @@ class TestShapeMismatch:
         # provoke the shape check is to write a checkpoint whose recorded obs_dim
         # differs from the eval dataset's obs_dim.
         rng_in = jax.random.key(3)
-        model = MLEEnsemble(OBS_DIM, ACT_DIM, DATASET_ID, MLE_CFG)
+        model = UnifloralEnsembleMLP(OBS_DIM, ACT_DIM, DATASET_ID, MLE_CFG)
         model.train(synthetic_dataset, MLE_CFG, rng_in)
         ckpt_path = tmp_path / "world_model.pkl"
         ckpt = {

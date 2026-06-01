@@ -64,7 +64,23 @@ class EnsembleDynamics(ABC):
         """Return a scalar validation MSE for *dataset* matching the training-time formula.
 
         Each subclass implements the same scalar its training loop logs as ``val_mse``
-        (or ``val_mse_elite`` in the MLE-ensemble case). Iteration is deterministic
-        over contiguous chunks covering all transitions — no shuffling, no tail drop —
-        so the returned number is reproducible and well-defined on arbitrary datasets.
+        (or ``val_mse_elite`` in the ensemble case). Iteration is deterministic over
+        contiguous chunks covering all transitions — no shuffling, no tail drop — so the
+        returned number is reproducible and well-defined on arbitrary datasets.
         """
+
+
+def load_world_model_from_checkpoint(path: str) -> "EnsembleDynamics":
+    """Load a world model, resolving its class from the checkpoint's ``_target_``.
+
+    Lets callers (policy training, eval) stay agnostic to which world-model class
+    produced the checkpoint — the class is whatever the training run recorded in
+    ``world_model_cfg._target_``.
+    """
+    import pickle
+
+    from hydra.utils import get_class
+
+    with open(path, "rb") as f:
+        target = pickle.load(f)["world_model_cfg"]["_target_"]
+    return get_class(target).load_from_checkpoint(path)

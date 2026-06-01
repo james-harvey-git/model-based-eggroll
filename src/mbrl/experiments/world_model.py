@@ -11,9 +11,6 @@ from omegaconf import DictConfig, OmegaConf
 
 from mbrl.data import load_dataset
 from mbrl.logger import Logger
-from mbrl.world_models.eggroll import EGGROLLEnsemble
-from mbrl.world_models.mle import MLEEnsemble
-from mbrl.world_models.mle_dynamicsnet import MLEDynamicsNet
 
 
 def run(cfg: DictConfig, logger: Logger) -> None:
@@ -58,15 +55,6 @@ def run(cfg: DictConfig, logger: Logger) -> None:
     world_model = wm_cls(info.obs_dim, info.act_dim, info.dataset_id, cfg.world_model)
     start_time = time.perf_counter()
 
-    # Normalize the x-axis to update-step count (1 update per epoch for EGGROLL;
-    # batches_per_epoch updates per epoch for MLE).
-    if isinstance(world_model, (MLEEnsemble, MLEDynamicsNet)):
-        n_train = int((1 - cfg.world_model.validation_split) * dataset.obs.shape[0])
-        updates_per_epoch = max(n_train // cfg.world_model.batch_size, 1)
-    else:
-        updates_per_epoch = 1
-    max_step = max(int(cfg.world_model.num_epochs) * updates_per_epoch, 1)
-
     def log_fn(
         step: int,
         train_loss: float,
@@ -93,7 +81,6 @@ def run(cfg: DictConfig, logger: Logger) -> None:
             metrics["sigma"] = float(sigma)
         if epoch is not None:
             metrics["epoch"] = float(epoch)
-        metrics["normalized_step"] = float(step) / max_step
         metrics["transitions_seen"] = float(transitions_seen)
         metrics["forward_evals"] = float(forward_evals)
         metrics["wall_time_sec"] = time.perf_counter() - start_time
@@ -107,23 +94,13 @@ def run(cfg: DictConfig, logger: Logger) -> None:
         "dataset_id": info.dataset_id,
         "world_model_cfg": OmegaConf.to_container(cfg.world_model),
         "wm_group": logger.wm_group,
+        # Carried so a fine-tune of this checkpoint can extend the lineage chain.
+        "finetune_lineage": logger.finetune_lineage,
     }
 
-    if isinstance(world_model, MLEEnsemble):
-        checkpoint = {
-            **common,
-            "params": world_model.params,
-            "num_elites": world_model.num_elites,
-        }
-    elif isinstance(world_model, MLEDynamicsNet):
-        checkpoint = {**common, **world_model.checkpoint_state()}
-    else:
-        assert isinstance(world_model, EGGROLLEnsemble)
-        checkpoint = {
-            **common,
-            "eggroll_state": world_model.checkpoint_state(),
-            "last_train_epoch": world_model._last_train_epoch,
-        }
+    # Every world-model class exposes checkpoint_state(); the class is recovered on
+    # load from world_model_cfg._target_, so no per-class branching is needed here.
+    checkpoint = {**common, **world_model.checkpoint_state()}
 
     checkpoint_path = Path(cfg.checkpoint_dir) / "world_model.pkl"
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)

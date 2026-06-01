@@ -2,6 +2,7 @@
 
 from datetime import datetime
 import os
+import pickle
 from typing import Any, cast  # noqa: I001
 
 from omegaconf import DictConfig, OmegaConf
@@ -21,10 +22,19 @@ _STAGE_SUFFIX: dict[str, str] = {
 
 
 def _world_model_type(cfg: DictConfig) -> str:
-    """Extract a short world model identifier from _target_, e.g. 'mle' or 'eggroll'."""
+    """Short world-model identifier: the training algorithm (``eggroll`` | ``backprop``)
+    for ``EnsembleMLP``, or ``unifloral`` for the ported Flax baseline.
+
+    Used in run/group names, tags, and the checkpoint subdir so the backprop-vs-eggroll
+    comparison the project exists to make is legible at a glance.
+    """
     target: str = cfg.world_model.get("_target_", "unknown")
-    class_name = target.split(".")[-1]  # e.g. "MLEEnsemble"
-    return class_name.replace("Ensemble", "").lower()  # e.g. "mle"
+    class_name = target.split(".")[-1]
+    if class_name == "EnsembleMLP":
+        return str(cfg.world_model.get("trainer", "unknown"))
+    if class_name == "UnifloralEnsembleMLP":
+        return "unifloral"
+    return class_name.lower()
 
 
 def _algorithm_type(cfg: DictConfig) -> str:
@@ -82,47 +92,86 @@ def auto_tags(cfg: DictConfig) -> list[str]:
     if cfg.get("debug", False):
         auto.add("debug")
 
+    wm = cfg.get("world_model", None)
+    if wm is not None:
+        if wm.get("init_checkpoint", None):
+            auto.add("finetune")
+        if wm.get("trainer") == "eggroll":
+            auto.add("shared-pert" if wm.get("use_shared_perturbations", False) else "indep-pert")
+
     manual = [t.lower() for t in cfg.get("wandb", {}).get("tags", [])]
     return sorted(auto) + [t for t in manual if t not in auto]
 
 
-# Top-level config keys for W&B legend templates.
-_OPTIMIZER_MAP: dict[str, str] = {
-    "EGGROLLEnsemble": "eggroll",
-    "MLEEnsemble": "backprop",
-    "MLEDynamicsNet": "backprop",
-}
+def _legend_fields(cfg: DictConfig) -> dict:
+    """Flat top-level keys promoted into the W&B run config for legend templates and
+    runs-table columns.
 
-_ARCH_MAP: dict[str, str] = {
-    "MLEEnsemble": "ensemble",
-    "MLEDynamicsNet": "single",
-}
-
-
-def _world_model_class_name(cfg: DictConfig) -> str:
-    target: str = cfg.world_model.get("_target_", "unknown")
-    return target.split(".")[-1]
-
-
-def _legend_fields(cfg: DictConfig) -> dict[str, str]:
-    """Flat top-level keys for W&B legend templates.
-
-    Adds ``optimizer`` (eggroll vs backprop), ``arch`` (ensemble vs single, for
-    backprop variants only) and ``backbone`` (mlp vs residual_mlp). Returns ``{}``
-    when ``cfg.world_model`` is absent.
+    ``trainer`` is the training algorithm (eggroll | backprop) — named to avoid clashing
+    with ``optimizer``/``solver``, which always means the optax solver. Shared
+    hyperparameters are always included; trainer-specific ones (population size, sigma,
+    ... for eggroll; batch size for backprop) appear only on the runs that have them —
+    W&B leaves the column blank for runs that don't, which is the desired behaviour.
     """
     if "world_model" not in cfg:
         return {}
-    class_name = _world_model_class_name(cfg)
-    fields: dict[str, str] = {}
-    if class_name in _OPTIMIZER_MAP:
-        fields["optimizer"] = _OPTIMIZER_MAP[class_name]
-    if class_name in _ARCH_MAP:
-        fields["arch"] = _ARCH_MAP[class_name]
-    # MLEEnsemble has no `backbone` field (Flax SingleDynamicsModel is a flat MLP);
-    # the default correctly describes the static architecture there.
-    fields["backbone"] = str(cfg.world_model.get("backbone", "mlp"))
+    wm = cfg.world_model
+    wm_type = _world_model_type(cfg)
+    fields: dict = {
+        "trainer": "backprop" if wm_type == "unifloral" else wm_type,
+        "backbone": str(wm.get("backbone", "mlp")),
+    }
+    for k in ("num_ensemble", "num_elites"):
+        if k in wm:
+            fields[k] = wm[k]
+    if wm.get("trainer") == "eggroll" and "eggroll" in wm:
+        eg = wm.eggroll
+        fields["lr"] = eg.get("lr")
+        fields["population_size"] = eg.get("population_size")
+        fields["sigma"] = eg.get("sigma")
+        fields["group_size"] = eg.get("group_size")
+        fields["use_shared_perturbations"] = bool(wm.get("use_shared_perturbations", False))
+    else:
+        if "lr" in wm:
+            fields["lr"] = wm.lr
+        if "batch_size" in wm:
+            fields["batch_size"] = wm.batch_size
     return fields
+
+
+def _finetune_provenance(cfg: DictConfig) -> dict:
+    """Manifest fields recording the checkpoint a fine-tune run started from.
+
+    Recorded in the run config (not the run name) so backprop->eggroll, eggroll->backprop
+    and eggroll->eggroll lineages are filterable. ``finetune_lineage`` chains across
+    repeated fine-tunes by carrying the parent's recorded lineage forward.
+    """
+    wm = cfg.get("world_model", None)
+    path = wm.get("init_checkpoint", None) if wm else None
+    if not path:
+        return {}
+    try:
+        with open(path, "rb") as f:
+            src = pickle.load(f)
+    except (FileNotFoundError, OSError, pickle.UnpicklingError):
+        return {"is_finetune": True}
+    src_cfg = src.get("world_model_cfg", {})
+    src_class = str(src_cfg.get("_target_", "")).split(".")[-1]
+    if src_class == "EnsembleMLP":
+        src_trainer = str(src_cfg.get("trainer", "unknown"))
+    elif src_class == "UnifloralEnsembleMLP":
+        src_trainer = "unifloral"
+    else:
+        src_trainer = src_class.lower() or "unknown"
+    parent_lineage = src.get("finetune_lineage") or src_trainer
+    return {
+        "is_finetune": True,
+        "finetuned_from_trainer": src_trainer,
+        "finetuned_from_group": src.get("wm_group"),
+        "finetuned_from_seed": src.get("seed"),
+        "finetuned_from_steps": src.get("update_steps_completed"),
+        "finetune_lineage": f"{parent_lineage}->{_world_model_type(cfg)}",
+    }
 
 
 def _is_sweep_run() -> bool:
@@ -149,12 +198,18 @@ class Logger:
         ts = timestamp or datetime.now().strftime("%Y%m%d-%H%M%S")
         self.wm_group: str = wm_group or make_wm_group(cfg, ts)
 
+        # Fine-tune lineage (e.g. "backprop->eggroll"); recorded in the saved checkpoint
+        # so a subsequent fine-tune can chain it. None for from-scratch runs.
+        provenance = _finetune_provenance(cfg)
+        self.finetune_lineage: str | None = provenance.get("finetune_lineage")
+
         wandb_cfg = cfg.get("wandb", {})
         self.enabled: bool = wandb_cfg.get("enabled", False)  # type: ignore[union-attr]
         if self.enabled:
             name = wandb_cfg.get("name", None) or _auto_name(cfg, ts)  # type: ignore[union-attr]
             config_dict = cast(dict[str, Any], OmegaConf.to_container(cfg, resolve=True))
             config_dict.update(_legend_fields(cfg))
+            config_dict.update(provenance)
             wandb.init(
                 project="model-based-eggroll",
                 entity=wandb_cfg.get("entity", "model-based-eggroll"),  # type: ignore[union-attr]
@@ -164,6 +219,12 @@ class Logger:
                 tags=auto_tags(cfg),
                 config=config_dict,
             )
+            # Default the loss x-axis to transitions seen (data efficiency) so backprop
+            # and eggroll runs overlay on a comparable axis rather than the update step.
+            wandb.define_metric("world_model/transitions_seen")
+            for metric in ("world_model/val_mse", "world_model/val_mse_elite",
+                           "world_model/train_loss"):
+                wandb.define_metric(metric, step_metric="world_model/transitions_seen")
 
     @classmethod
     def from_existing_run(cls, _cfg: DictConfig, wm_group: str | None = None) -> "Logger":
@@ -174,6 +235,7 @@ class Logger:
         instance = cls.__new__(cls)
         instance.enabled = True
         instance.wm_group = wm_group or ""
+        instance.finetune_lineage = None
         return instance
 
     def finish(self) -> None:

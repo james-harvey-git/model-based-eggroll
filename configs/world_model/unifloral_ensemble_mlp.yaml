@@ -1,4 +1,4 @@
-_target_: mbrl.world_models.mle.MLEEnsemble
+_target_: mbrl.world_models.unifloral_ensemble_mlp.UnifloralEnsembleMLP
 
 # Ensemble
 num_ensemble: 7
