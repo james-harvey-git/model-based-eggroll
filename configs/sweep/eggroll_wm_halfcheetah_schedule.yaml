@@ -27,27 +27,27 @@
 
 program: scripts/sweep_world_model.py
 method: random
-run_cap: 96
+run_cap: 250
 metric:
   name: world_model/val_mse
   goal: minimize
 early_terminate:
   type: hyperband
-  min_iter: 10000
-  eta: 3
-  s: 2
+  min_iter: 22
+  eta: 2
+  strict: false
 parameters:
   # ── Pinned architecture / batching / budget (match the reference config) ─────
   population_size:
     value: 4096
   group_size:
-    value: 256
+    value: 4096
   solver:
     value: sgd
   backbone:
     value: residual_mlp
   num_epochs:
-    value: 62500
+    value: 800000
   sigma_schedule:
     value: cosine
   lr_schedule:
@@ -56,17 +56,17 @@ parameters:
   # ── Swept: EGGROLL perturbation scale + step size ────────────────────────────
   sigma:
     distribution: log_uniform_values
-    min: 0.01         # geometric centre of [0.01, 0.2] is ~0.045 (ref 0.05)
-    max: 0.2
+    min: 0.01
+    max: 0.1
   lr:
     distribution: log_uniform_values
-    min: 0.02         # geometric centre of [0.02, 0.5] is ~0.1 (ref 0.1)
-    max: 0.5
+    min: 0.02
+    max: 0.3
 
   # ── Swept: sigma cosine schedule shape ───────────────────────────────────────
   sigma_decay_steps:
     distribution: q_log_uniform_values
-    min: 31250        # 0.5x horizon — reaches alpha floor before training ends
+    min: 1e4        # 0.5x horizon — reaches alpha floor before training ends
     max: 1000000      # ~16x horizon — near-constant (brackets reference 937500)
     q: 1
   sigma_alpha:
@@ -77,10 +77,10 @@ parameters:
   # ── Swept: lr cosine schedule shape ──────────────────────────────────────────
   lr_decay_steps:
     distribution: q_log_uniform_values
-    min: 31250        # 0.5x horizon — reaches alpha floor before training ends
-    max: 6250000      # 100x horizon — near-constant (brackets reference 6250000)
+    min: 7e5        # 0.5x horizon — reaches alpha floor before training ends
+    max: 1.5e6      # 100x horizon — near-constant (brackets reference 6250000)
     q: 1
   lr_alpha:
     distribution: log_uniform_values
     min: 0.01         # decays to 1% of lr
-    max: 0.9          # decays to 90% of lr (near-constant); ref 0.1
+    max: 0.95          # decays to 90% of lr (near-constant); ref 0.1

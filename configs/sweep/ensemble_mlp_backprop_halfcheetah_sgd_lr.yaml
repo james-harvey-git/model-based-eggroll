@@ -27,7 +27,7 @@
 
 program: scripts/sweep_ensemble_mlp_backprop.py
 method: random
-run_cap: 32
+run_cap: 100
 metric:
   name: world_model/val_mse
   goal: minimize
