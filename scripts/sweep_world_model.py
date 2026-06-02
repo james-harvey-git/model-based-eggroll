@@ -71,6 +71,8 @@ def compose_config(overrides: dict | None = None) -> DictConfig:
             "activation": "world_model.activation",
             "init_checkpoint": "world_model.init_checkpoint",
             "reset_optax_state": "world_model.reset_optax_state",
+            "num_ensemble": "world_model.num_ensemble",
+            "num_elites": "world_model.num_elites",
         }
         for key, path in mapping.items():
             if key in overrides:
