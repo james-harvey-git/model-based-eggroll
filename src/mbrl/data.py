@@ -108,3 +108,15 @@ def train_val_split(
     train = jax.tree.map(lambda x: x[train_idxs], dataset)
     val = jax.tree.map(lambda x: x[val_idxs], dataset)
     return train, val
+
+
+def derive_train_val_split(
+    dataset: Transition, val_fraction: float, seed: int
+) -> tuple[Transition, Transition]:
+    """Deterministic train/val split keyed only on (dataset, val_fraction, seed).
+
+    The partition is a pure function of the seed, decoupled from any training rng,
+    so a fine-tune run reproduces a checkpoint's exact held-out val set by passing the
+    checkpoint's seed + val_fraction. Both world-model trainers use this for val parity.
+    """
+    return train_val_split(dataset, val_fraction, jax.random.key(int(seed)))

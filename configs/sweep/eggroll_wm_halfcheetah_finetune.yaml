@@ -1,6 +1,6 @@
 # EGGROLL finetune sweep over (sigma, sigma_decay_rate, lr).
 #
-# Starts every trial from the same stage-1 MLEDynamicsNet checkpoint
+# Starts every trial from the same stage-1 backprop EnsembleMLP checkpoint
 # (`init_checkpoint` below) so the only variation across trials is the
 # three swept EGGROLL HPs. AdamW state is carried over from the
 # pretrain run (reset_optax_state=false) — empirically this helps
@@ -50,9 +50,12 @@ parameters:
   activation:
     value: pqn
 
-  # ── Warm-start from stage-1 MLE pretrain ────────────────────────────────────
+  # ── Warm-start from a stage-1 backprop pretrain ─────────────────────────────
+  # NOTE: point this at a stage-1 checkpoint produced by the backprop trainer
+  # (world_model=ensemble_mlp_backprop). Group names are keyed on the trainer,
+  # e.g. backprop-halfcheetah-medium-s0-<timestamp>.
   init_checkpoint:
-    value: checkpoints/halfcheetah_medium_mle_pretrain/mledynamicsnet-halfcheetah-medium-s0-20260508-113811/world_model.pkl
+    value: checkpoints/halfcheetah_medium_backprop_pretrain/backprop-halfcheetah-medium-s0-REGENERATE/world_model.pkl
   reset_optax_state:
     value: false
 

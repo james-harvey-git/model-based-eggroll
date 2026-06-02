@@ -1,5 +1,5 @@
 # @package _global_
 defaults:
   - override /dataset: halfcheetah_medium
-  - override /world_model: mle
+  - override /world_model: unifloral_ensemble_mlp
   - override /policy_optimizer: mopo

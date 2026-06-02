@@ -14,7 +14,7 @@ from mbrl.data import load_dataset
 from mbrl.evaluation import compute_normalized_score, evaluate_policy_vectorized, get_env_id
 from mbrl.logger import Logger, _algorithm_type
 from mbrl.policy_optimizers.sac_n import TanhGaussianActor
-from mbrl.world_models.mle import MLEEnsemble
+from mbrl.world_models.base import load_world_model_from_checkpoint
 
 
 def run(cfg: DictConfig, logger: Logger) -> None:
@@ -33,7 +33,7 @@ def run(cfg: DictConfig, logger: Logger) -> None:
     wm_checkpoint_path = Path(cfg.checkpoint_dir) / "world_model.pkl"
     with open(wm_checkpoint_path, "rb") as f:
         wm_ckpt = pickle.load(f)
-    world_model = MLEEnsemble.load_from_checkpoint(wm_checkpoint_path)
+    world_model = load_world_model_from_checkpoint(str(wm_checkpoint_path))
 
     # Resolve the policy optimizer module via importlib convention
     target: str = cfg.policy_optimizer._target_  # e.g. "mbrl.policy_optimizers.mopo.train"

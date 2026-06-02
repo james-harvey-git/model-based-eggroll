@@ -57,7 +57,7 @@ def run_cfg(tmp_path):
             "wandb": {"enabled": False},
             "dataset": {"name": DATASET_ID},
             "world_model": {
-                "_target_": "mbrl.world_models.mle.MLEEnsemble",
+                "_target_": "mbrl.world_models.unifloral_ensemble_mlp.UnifloralEnsembleMLP",
                 "num_ensemble": 3,
                 "num_elites": 2,
                 "n_layers": 2,
@@ -98,7 +98,9 @@ def policy_run_cfg(tmp_path):
             "policy_checkpoint_dir": str(policy_dir),
             "wandb": {"enabled": False},
             "dataset": {"name": DATASET_ID},
-            "world_model": {"_target_": "mbrl.world_models.mle.MLEEnsemble"},
+            "world_model": {
+                "_target_": "mbrl.world_models.unifloral_ensemble_mlp.UnifloralEnsembleMLP"
+            },
             "policy_optimizer": {
                 "_target_": "mbrl.policy_optimizers.mopo.train",
                 "eval_interval": 1,
@@ -157,7 +159,7 @@ class TestWorldModelRun:
         assert len(init_calls) == 1
         assert "val_mse" in init_calls[0]
         assert "train_loss" not in init_calls[0]
-        assert init_calls[0]["normalized_step"] == 0.0
+        assert init_calls[0]["transitions_seen"] == 0.0
         assert init_calls[0]["epoch"] == 0.0
         assert "wall_time_sec" in init_calls[0]
         assert len(train_calls) == run_cfg.world_model.num_epochs
@@ -172,15 +174,16 @@ class TestWorldModelRun:
         ]
         assert all("train_loss" in c for c in train_calls)
         assert all("val_mse" in c for c in train_calls)
-        assert all("normalized_step" in c for c in log_calls)
+        assert all("transitions_seen" in c for c in log_calls)
         assert all("epoch" in c for c in log_calls)
         assert all("transitions_seen" in c for c in train_calls)
         assert all("forward_evals" in c for c in train_calls)
         assert all("wall_time_sec" in c for c in train_calls)
-        assert [c["normalized_step"] for c in log_calls] == sorted(
-            c["normalized_step"] for c in log_calls
+        # transitions_seen is the data-efficiency x-axis: monotonic non-decreasing
+        # across the whole run (the init call is 0).
+        assert [c["transitions_seen"] for c in log_calls] == sorted(
+            c["transitions_seen"] for c in log_calls
         )
-        assert log_calls[-1]["normalized_step"] == 1.0
         assert [c["transitions_seen"] for c in train_calls] == sorted(
             c["transitions_seen"] for c in train_calls
         )
@@ -200,7 +203,7 @@ class TestPolicyRun:
             wm_checkpoint_path,
             {
                 "dataset_id": DATASET_ID,
-                "wm_group": "mle-halfcheetah-medium-s0-20260413-120000",
+                "wm_group": "unifloral-halfcheetah-medium-s0-20260413-120000",
             },
         )
 
@@ -214,14 +217,14 @@ class TestPolicyRun:
 
         logger = Logger(
             policy_run_cfg,
-            wm_group="mle-halfcheetah-medium-s0-20260413-120000",
+            wm_group="unifloral-halfcheetah-medium-s0-20260413-120000",
             timestamp="20260413-120000",
         )
         original_import_module = importlib.import_module
 
         with patch("mbrl.experiments.policy.load_dataset", return_value=(dataset, info)):
             with patch(
-                "mbrl.experiments.policy.MLEEnsemble.load_from_checkpoint",
+                "mbrl.experiments.policy.load_world_model_from_checkpoint",
                 return_value=object(),
             ):
                 with patch(
@@ -239,7 +242,7 @@ class TestPolicyRun:
 
         assert ckpt["dataset_id"] == DATASET_ID
         assert ckpt["world_model_dataset_id"] == DATASET_ID
-        assert ckpt["wm_group"] == "mle-halfcheetah-medium-s0-20260413-120000"
+        assert ckpt["wm_group"] == "unifloral-halfcheetah-medium-s0-20260413-120000"
         assert ckpt["seed"] == 0
         assert ckpt["stage"] == "policy"
         assert ckpt["algorithm"] == "mopo"

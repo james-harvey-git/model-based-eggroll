@@ -1,4 +1,4 @@
-"""W&B sweep entry point for MLEDynamicsNet (Stage-1) hyperparameter tuning.
+"""W&B sweep entry point for EnsembleMLP backprop-trainer hyperparameter tuning.
 
 Called once per SLURM task via:
     wandb agent --count 1 "model-based-eggroll/model-based-eggroll/<SWEEP_ID>"
@@ -6,9 +6,9 @@ Called once per SLURM task via:
 The agent sets sweep parameters on wandb.config before invoking this script.
 This file bypasses Hydra's @hydra.main decorator and composes the OmegaConf
 config manually, mirroring scripts/sweep_world_model.py (the EGGROLL world-model
-sweep) but targeting the `mle_dynamicsnet` world model instead.
+sweep) but targeting the backprop trainer of EnsembleMLP instead.
 
-Primary use: sweeping the SGD learning rate for MLEDynamicsNet training.
+Primary use: sweeping the SGD learning rate for backprop ensemble training.
 """
 
 from pathlib import Path
@@ -22,7 +22,7 @@ from mbrl.logger import Logger, auto_tags
 
 
 def compose_config(overrides: dict | None = None) -> DictConfig:
-    """Manually replicate Hydra's config composition for an MLEDynamicsNet run."""
+    """Manually replicate Hydra's config composition for a backprop EnsembleMLP run."""
     raw = OmegaConf.load("configs/config.yaml")
     assert isinstance(raw, DictConfig)
     defaults = OmegaConf.to_container(raw.pop("defaults", []))
@@ -43,14 +43,14 @@ def compose_config(overrides: dict | None = None) -> DictConfig:
     OmegaConf.update(
         base,
         "world_model",
-        OmegaConf.load("configs/world_model/mle_dynamicsnet.yaml"),
+        OmegaConf.load("configs/world_model/ensemble_mlp_backprop.yaml"),
     )
     OmegaConf.update(base, "wandb.enabled", True)
     OmegaConf.update(base, "debug", False)
     OmegaConf.update(base, "world_model.optimizer", "sgd")
 
     if overrides:
-        # The base mle_dynamicsnet config carries AdamW-shaped optimizer_kwargs
+        # The base ensemble_mlp_backprop config carries AdamW-shaped optimizer_kwargs
         # ({eps, weight_decay}) which optax.sgd (and optax.adam) reject. Clear
         # them up front for any non-adamw solver, *before* applying the kwarg
         # overrides below — so a swept momentum lands in an empty dict rather
@@ -84,7 +84,7 @@ def compose_config(overrides: dict | None = None) -> DictConfig:
 
 
 def _validate_sweep_params(cfg: DictConfig) -> None:
-    """Validate MLEDynamicsNet training knobs before launching a run."""
+    """Validate backprop EnsembleMLP training knobs before launching a run."""
     # Fail fast on an unsupported solver name (resolve raises with the list).
     resolve_optax_solver(str(cfg.world_model.get("optimizer", "adamw")))
     if float(cfg.world_model.lr) <= 0.0:
@@ -96,7 +96,7 @@ def _validate_sweep_params(cfg: DictConfig) -> None:
 
 
 def sweep_run() -> None:
-    """Execute a single W&B sweep trial for MLEDynamicsNet training."""
+    """Execute a single W&B sweep trial for backprop EnsembleMLP training."""
     wandb.init()
     sweep_params = dict(wandb.config)
 
@@ -109,12 +109,12 @@ def sweep_run() -> None:
         wandb.run.tags = tuple(sorted(existing | new_tags))
 
         run_id = wandb.run.id
-        wm_group = wandb.run.group or f"mle-dynamicsnet-sweep-{run_id}"
+        wm_group = wandb.run.group or f"backprop-wm-sweep-{run_id}"
     else:
         run_id = "local"
-        wm_group = f"mle-dynamicsnet-sweep-{run_id}"
+        wm_group = f"backprop-wm-sweep-{run_id}"
 
-    checkpoint_dir = Path("checkpoints/sweep/mle_dynamicsnet") / run_id
+    checkpoint_dir = Path("checkpoints/sweep/ensemble_mlp_backprop") / run_id
     OmegaConf.update(cfg, "checkpoint_dir", str(checkpoint_dir))
 
     logger = Logger.from_existing_run(cfg, wm_group=wm_group)

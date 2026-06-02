@@ -19,12 +19,11 @@ import numpy as np
 from omegaconf import DictConfig, OmegaConf
 import pytest
 
-from mbrl.data import Transition, train_val_split
+from mbrl.data import Transition, derive_train_val_split, train_val_split
 from mbrl.experiments import wm_eval
 from mbrl.logger import Logger
-from mbrl.world_models.eggroll import EGGROLLEnsemble
-from mbrl.world_models.mle import MLEEnsemble
-from mbrl.world_models.mle_dynamicsnet import MLEDynamicsNet
+from mbrl.world_models.ensemble_mlp import EnsembleMLP
+from mbrl.world_models.unifloral_ensemble_mlp import UnifloralEnsembleMLP
 
 OBS_DIM = 4
 ACT_DIM = 2
@@ -33,7 +32,7 @@ BATCH_SIZE = 32  # divides n_val=32 cleanly → no tail-drop in training-time va
 
 MLE_CFG = OmegaConf.create(
     {
-        "_target_": "mbrl.world_models.mle.MLEEnsemble",
+        "_target_": "mbrl.world_models.unifloral_ensemble_mlp.UnifloralEnsembleMLP",
         "num_ensemble": 3,
         "num_elites": 2,
         "n_layers": 2,
@@ -47,12 +46,18 @@ MLE_CFG = OmegaConf.create(
     }
 )
 
-MLE_DYN_CFG = OmegaConf.create(
+# full_validation_interval=1 so the final update step logs a val_mse_elite at the
+# final params — the value compute_val_mse must reproduce on reload.
+ENS_BACKPROP_CFG = OmegaConf.create(
     {
-        "_target_": "mbrl.world_models.mle_dynamicsnet.MLEDynamicsNet",
+        "_target_": "mbrl.world_models.ensemble_mlp.EnsembleMLP",
+        "trainer": "backprop",
+        "num_ensemble": 3,
+        "num_elites": 2,
         "hidden_dims": [8, 8],
         "activation": "relu",
         "init_scheme": "eggroll",
+        "backbone": "mlp",
         "num_epochs": 4,
         "batch_size": BATCH_SIZE,
         "lr": 1e-3,
@@ -62,22 +67,31 @@ MLE_DYN_CFG = OmegaConf.create(
         "logvar_diff_coef": 0.01,
         "max_logvar_init": 0.5,
         "min_logvar_init": -10.0,
-        "num_members": 1,
+        "log_interval": 1,
+        "full_validation_interval": 1,
         "seed": 0,
     }
 )
 
-EGGROLL_CFG = OmegaConf.create(
+ENS_EGGROLL_CFG = OmegaConf.create(
     {
-        "_target_": "mbrl.world_models.eggroll.EGGROLLEnsemble",
-        "num_members": 2,
+        "_target_": "mbrl.world_models.ensemble_mlp.EnsembleMLP",
+        "trainer": "eggroll",
+        "num_ensemble": 2,
+        "num_elites": 1,
         "hidden_dims": [8, 8],
         "activation": "relu",
+        "init_scheme": "eggroll",
+        "backbone": "mlp",
         "num_epochs": 8,
         "validation_split": 0.5,
         "logvar_diff_coef": 0.01,
+        "max_logvar_init": 0.5,
+        "min_logvar_init": -10.0,
         "log_interval": 1,
         "full_validation_interval": 1,
+        "use_shared_perturbations": False,
+        "seed": 0,
         "eggroll": {
             "population_size": 8,
             "group_size": 2,
@@ -85,6 +99,9 @@ EGGROLL_CFG = OmegaConf.create(
             "sigma": 0.01,
             "sigma_decay_rate": 0.997,
             "lr": 1e-3,
+            "solver": "adamw",
+            "solver_kwargs": {"weight_decay": 1e-5},
+            "use_batched_update": True,
         },
     }
 )
@@ -110,7 +127,7 @@ def _disabled_logger() -> Logger:
     return Logger(cfg, wm_group="test-group", timestamp="20260101-000000")
 
 
-def _write_mle_checkpoint(model: MLEEnsemble, path) -> None:
+def _write_mle_checkpoint(model: UnifloralEnsembleMLP, path) -> None:
     ckpt = {
         "params": model.params,
         "num_elites": model.num_elites,
@@ -124,34 +141,20 @@ def _write_mle_checkpoint(model: MLEEnsemble, path) -> None:
         pickle.dump(ckpt, f)
 
 
-def _write_mle_dyn_checkpoint(model: MLEDynamicsNet, path) -> None:
+def _write_ensemble_checkpoint(model: EnsembleMLP, cfg, path) -> None:
     ckpt = {
         **model.checkpoint_state(),
         "obs_dim": OBS_DIM,
         "act_dim": ACT_DIM,
         "dataset_id": DATASET_ID,
-        "world_model_cfg": OmegaConf.to_container(MLE_DYN_CFG),
+        "world_model_cfg": OmegaConf.to_container(cfg),
         "wm_group": "test-group",
     }
     with open(path, "wb") as f:
         pickle.dump(ckpt, f)
 
 
-def _write_eggroll_checkpoint(model: EGGROLLEnsemble, path) -> None:
-    ckpt = {
-        "eggroll_state": model.checkpoint_state(),
-        "last_train_epoch": model._last_train_epoch,
-        "obs_dim": OBS_DIM,
-        "act_dim": ACT_DIM,
-        "dataset_id": DATASET_ID,
-        "world_model_cfg": OmegaConf.to_container(EGGROLL_CFG),
-        "wm_group": "test-group",
-    }
-    with open(path, "wb") as f:
-        pickle.dump(ckpt, f)
-
-
-class TestMLEEnsembleRoundtrip:
+class TestUnifloralEnsembleMLPRoundtrip:
     def test_compute_val_mse_matches_training_val_mse_elite(
         self, synthetic_dataset, tmp_path
     ):
@@ -163,7 +166,7 @@ class TestMLEEnsembleRoundtrip:
                 captured.append(float(elite))
 
         rng_in = jax.random.key(7)
-        model = MLEEnsemble(OBS_DIM, ACT_DIM, DATASET_ID, MLE_CFG)
+        model = UnifloralEnsembleMLP(OBS_DIM, ACT_DIM, DATASET_ID, MLE_CFG)
         model.train(synthetic_dataset, MLE_CFG, rng_in, log_fn=log_fn)
 
         # Mirror train()'s rng chain: rng, split_rng, init_rng = jax.random.split(rng, 3).
@@ -175,7 +178,7 @@ class TestMLEEnsembleRoundtrip:
 
         ckpt_path = tmp_path / "world_model.pkl"
         _write_mle_checkpoint(model, ckpt_path)
-        reloaded = MLEEnsemble.load_from_checkpoint(ckpt_path)
+        reloaded = UnifloralEnsembleMLP.load_from_checkpoint(ckpt_path)
         reloaded_val_mse = float(reloaded.compute_val_mse(val_data))
 
         assert captured, "training never logged a finite val_mse_elite"
@@ -185,66 +188,46 @@ class TestMLEEnsembleRoundtrip:
         )
 
 
-class TestMLEDynamicsNetRoundtrip:
-    def test_compute_val_mse_matches_training_val_mse(self, synthetic_dataset, tmp_path):
-        captured: list[float] = []
+def _ensemble_roundtrip(cfg, key, synthetic_dataset, tmp_path):
+    """Train an EnsembleMLP, then assert the final logged val_mse_elite equals
+    compute_val_mse on the reloaded checkpoint over the same val split."""
+    captured: list[float] = []
 
-        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals, **kwargs):
-            if np.isfinite(val_mse):
-                captured.append(float(val_mse))
+    def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals, **kwargs):
+        elite = kwargs.get("val_mse_elite")
+        if elite is not None and np.isfinite(elite):
+            captured.append(float(elite))
 
-        rng_in = jax.random.key(11)
-        model = MLEDynamicsNet(OBS_DIM, ACT_DIM, DATASET_ID, MLE_DYN_CFG)
-        model.train(synthetic_dataset, MLE_DYN_CFG, rng_in, log_fn=log_fn)
+    model = EnsembleMLP(OBS_DIM, ACT_DIM, DATASET_ID, cfg)
+    model.train(synthetic_dataset, cfg, jax.random.key(key), log_fn=log_fn)
+    # Flush async jax.debug.callback emissions before asserting on `captured`.
+    jax.effects_barrier()
 
-        _, val_data = train_val_split(
-            synthetic_dataset,
-            float(MLE_DYN_CFG.validation_split),
-            jax.random.split(rng_in, 3)[1],
-        )
+    # Both trainers derive the val split deterministically from (validation_split, seed).
+    _, val_data = derive_train_val_split(
+        synthetic_dataset, float(cfg.validation_split), int(cfg.seed)
+    )
 
-        ckpt_path = tmp_path / "world_model.pkl"
-        _write_mle_dyn_checkpoint(model, ckpt_path)
-        reloaded = MLEDynamicsNet.load_from_checkpoint(ckpt_path)
-        reloaded_val_mse = float(reloaded.compute_val_mse(val_data))
+    ckpt_path = tmp_path / "world_model.pkl"
+    _write_ensemble_checkpoint(model, cfg, ckpt_path)
+    reloaded = EnsembleMLP.load_from_checkpoint(ckpt_path)
+    reloaded_val_mse = float(reloaded.compute_val_mse(val_data))
 
-        # captured contains the init log + per-epoch logs; the last is the final epoch.
-        assert len(captured) >= 2
-        assert np.isclose(captured[-1], reloaded_val_mse, atol=1e-5)
+    assert captured, "training never logged a finite val_mse_elite"
+    assert np.isclose(captured[-1], reloaded_val_mse, atol=1e-5), (
+        f"final training val_mse_elite={captured[-1]} vs "
+        f"compute_val_mse from checkpoint={reloaded_val_mse}"
+    )
 
 
-class TestEGGROLLEnsembleRoundtrip:
-    def test_compute_val_mse_matches_training_val_mse(self, synthetic_dataset, tmp_path):
-        captured: list[float] = []
+class TestEnsembleMLPBackpropRoundtrip:
+    def test_compute_val_mse_matches_training_val_mse_elite(self, synthetic_dataset, tmp_path):
+        _ensemble_roundtrip(ENS_BACKPROP_CFG, 11, synthetic_dataset, tmp_path)
 
-        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals, **kwargs):
-            if np.isfinite(val_mse):
-                captured.append(float(val_mse))
 
-        rng_in = jax.random.key(13)
-        model = EGGROLLEnsemble(OBS_DIM, ACT_DIM, DATASET_ID, EGGROLL_CFG)
-        model.train(synthetic_dataset, EGGROLL_CFG, rng_in, log_fn=log_fn)
-        # Flush async jax.debug.callback emissions before asserting on `captured`.
-        jax.effects_barrier()
-
-        # Mirror train()'s rng chain (non-warm-start branch at eggroll.py:318):
-        # rng, split_rng, init_rng, es_rng = jax.random.split(rng, 4).
-        _, val_data = train_val_split(
-            synthetic_dataset,
-            float(EGGROLL_CFG.validation_split),
-            jax.random.split(rng_in, 4)[1],
-        )
-
-        ckpt_path = tmp_path / "world_model.pkl"
-        _write_eggroll_checkpoint(model, ckpt_path)
-        reloaded = EGGROLLEnsemble.load_from_checkpoint(ckpt_path)
-        reloaded_val_mse = float(reloaded.compute_val_mse(val_data))
-
-        assert captured, "training never logged a finite val_mse"
-        assert np.isclose(captured[-1], reloaded_val_mse, atol=1e-5), (
-            f"final training val_mse={captured[-1]} vs "
-            f"compute_val_mse from checkpoint={reloaded_val_mse}"
-        )
+class TestEnsembleMLPEggrollRoundtrip:
+    def test_compute_val_mse_matches_training_val_mse_elite(self, synthetic_dataset, tmp_path):
+        _ensemble_roundtrip(ENS_EGGROLL_CFG, 13, synthetic_dataset, tmp_path)
 
 
 class TestShapeMismatch:
@@ -254,7 +237,7 @@ class TestShapeMismatch:
         # provoke the shape check is to write a checkpoint whose recorded obs_dim
         # differs from the eval dataset's obs_dim.
         rng_in = jax.random.key(3)
-        model = MLEEnsemble(OBS_DIM, ACT_DIM, DATASET_ID, MLE_CFG)
+        model = UnifloralEnsembleMLP(OBS_DIM, ACT_DIM, DATASET_ID, MLE_CFG)
         model.train(synthetic_dataset, MLE_CFG, rng_in)
         ckpt_path = tmp_path / "world_model.pkl"
         ckpt = {

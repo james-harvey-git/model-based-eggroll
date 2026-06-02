@@ -1,5 +1,5 @@
 # @package _global_
 defaults:
   - override /dataset: halfcheetah_medium
-  - override /world_model: eggroll_ensemble
+  - override /world_model: ensemble_mlp_eggroll
   - override /policy_optimizer: eggroll

@@ -202,14 +202,17 @@ def _train_dynamics(
 
 
 # ---------------------------------------------------------------------------
-# MLEEnsemble
+# UnifloralEnsembleMLP
 # ---------------------------------------------------------------------------
 
 
-class MLEEnsemble(EnsembleDynamics):
-    """Ensemble of dynamics models trained by maximum likelihood estimation.
+class UnifloralEnsembleMLP(EnsembleDynamics):
+    """Unifloral baseline: ensemble of probabilistic MLPs trained by MLE (NLL + AdamW).
 
-    Closely follows Unifloral's dynamics.py implementation.
+    Ported directly from Unifloral's dynamics.py and kept as a verifiable baseline,
+    independent of the EGGROLL primitives. The novel work lives in
+    :class:`mbrl.world_models.ensemble_mlp.EnsembleMLP`; this class trains by backprop
+    only (Flax networks) and so cannot be EGGROLL-trained.
     """
 
     def __init__(self, obs_dim: int, act_dim: int, dataset_id: str, cfg: DictConfig):
@@ -227,8 +230,8 @@ class MLEEnsemble(EnsembleDynamics):
         self.num_elites = None  # populated by train()
 
     @classmethod
-    def load_from_checkpoint(cls, path: str | Path) -> "MLEEnsemble":
-        """Reconstruct a trained MLEEnsemble from a checkpoint file."""
+    def load_from_checkpoint(cls, path: str | Path) -> "UnifloralEnsembleMLP":
+        """Reconstruct a trained UnifloralEnsembleMLP from a checkpoint file."""
         import pickle
 
         with open(path, "rb") as f:
@@ -242,6 +245,11 @@ class MLEEnsemble(EnsembleDynamics):
         instance.params = ckpt["params"]
         instance.num_elites = ckpt["num_elites"]
         return instance
+
+    def checkpoint_state(self) -> dict:
+        """Return the class-specific payload for the world-model checkpoint."""
+        assert self.params is not None, "Must call train() before checkpoint_state()"
+        return {"params": self.params, "num_elites": self.num_elites}
 
     @property
     def termination_fn(self) -> Callable:

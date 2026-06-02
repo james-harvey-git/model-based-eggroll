@@ -1,6 +1,6 @@
 defaults:
   - dataset: halfcheetah_medium
-  - world_model: mle
+  - world_model: ensemble_mlp_eggroll
   - policy_optimizer: mopo
   - networks: mlp
   - _self_

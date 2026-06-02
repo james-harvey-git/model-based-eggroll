@@ -8,6 +8,7 @@ from mbrl.data import (
     DatasetInfo,
     Transition,
     create_epoch_iterator,
+    derive_train_val_split,
     load_dataset,
     sample_batch,
     train_val_split,
@@ -105,3 +106,33 @@ class TestTrainValSplit:
         t1, _ = train_val_split(dataset, 0.2, jax.random.key(0))
         t2, _ = train_val_split(dataset, 0.2, jax.random.key(1))
         assert not jnp.array_equal(t1.obs, t2.obs)
+
+
+class TestDeriveTrainValSplit:
+    def test_sizes_sum_and_disjoint(self, dataset_and_info):
+        dataset, _ = dataset_and_info
+        train, val = derive_train_val_split(dataset, 0.2, seed=0)
+        n = dataset.obs.shape[0]
+        assert train.obs.shape[0] + val.obs.shape[0] == n
+        assert val.obs.shape[0] == n - int(0.8 * n)
+
+    def test_deterministic_in_seed(self, dataset_and_info):
+        dataset, _ = dataset_and_info
+        t1, v1 = derive_train_val_split(dataset, 0.2, seed=7)
+        t2, v2 = derive_train_val_split(dataset, 0.2, seed=7)
+        assert jnp.array_equal(t1.obs, t2.obs)
+        assert jnp.array_equal(v1.obs, v2.obs)
+
+    def test_different_seeds_give_different_splits(self, dataset_and_info):
+        dataset, _ = dataset_and_info
+        _, v0 = derive_train_val_split(dataset, 0.2, seed=0)
+        _, v1 = derive_train_val_split(dataset, 0.2, seed=1)
+        assert not jnp.array_equal(v0.obs, v1.obs)
+
+    def test_matches_train_val_split_on_key_seed(self, dataset_and_info):
+        # Pure function of seed: equivalent to train_val_split with key(seed).
+        dataset, _ = dataset_and_info
+        t_ref, v_ref = train_val_split(dataset, 0.2, jax.random.key(3))
+        t, v = derive_train_val_split(dataset, 0.2, seed=3)
+        assert jnp.array_equal(t.obs, t_ref.obs)
+        assert jnp.array_equal(v.obs, v_ref.obs)
