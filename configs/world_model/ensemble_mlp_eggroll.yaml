@@ -39,3 +39,7 @@ eggroll:
 init_checkpoint: null             # path to an EnsembleMLP checkpoint to fine-tune from
 reset_optax_state: true
 seed: null                        # set from top-level cfg.seed by experiments/world_model.py
+
+# Precompute MoReL halt-penalty stats (discrepancy, min_r) into the checkpoint.
+# Expensive O(N^2) one-off; enable only when this world model feeds MoReL.
+precompute_term_stats: false

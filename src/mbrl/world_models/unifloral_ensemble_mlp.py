@@ -228,6 +228,9 @@ class UnifloralEnsembleMLP(EnsembleDynamics):
         self._termination_fn = get_termination_fn(dataset_id)
         self.params = None  # populated by train()
         self.num_elites = None  # populated by train()
+        # MoReL halt-penalty stats; populated by precompute_term_stats() / load.
+        self._discrepancy: float | None = None
+        self._min_r: float | None = None
 
     @classmethod
     def load_from_checkpoint(cls, path: str | Path) -> "UnifloralEnsembleMLP":
@@ -244,12 +247,20 @@ class UnifloralEnsembleMLP(EnsembleDynamics):
         instance = cls(ckpt["obs_dim"], ckpt["act_dim"], ckpt["dataset_id"], wm_cfg_override)
         instance.params = ckpt["params"]
         instance.num_elites = ckpt["num_elites"]
+        # .get for back-compat with checkpoints saved before term stats existed.
+        instance._discrepancy = ckpt.get("discrepancy")
+        instance._min_r = ckpt.get("min_r")
         return instance
 
     def checkpoint_state(self) -> dict:
         """Return the class-specific payload for the world-model checkpoint."""
         assert self.params is not None, "Must call train() before checkpoint_state()"
-        return {"params": self.params, "num_elites": self.num_elites}
+        return {
+            "params": self.params,
+            "num_elites": self.num_elites,
+            "discrepancy": self._discrepancy,
+            "min_r": self._min_r,
+        }
 
     @property
     def termination_fn(self) -> Callable:

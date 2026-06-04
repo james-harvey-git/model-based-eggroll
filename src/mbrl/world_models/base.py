@@ -22,6 +22,32 @@ class EnsembleDynamics(ABC):
     def termination_fn(self) -> Callable:
         """Environment-specific termination function for model-based rollouts."""
 
+    @property
+    def discrepancy(self) -> float | None:
+        """Calibrated elite-disagreement scale for MoReL's halt penalty.
+
+        ``None`` unless :meth:`precompute_term_stats` has run (or a checkpoint that
+        recorded it was loaded). See ``world_models/term_stats.py``.
+        """
+        return getattr(self, "_discrepancy", None)
+
+    @property
+    def min_r(self) -> float | None:
+        """Minimum dataset reward, used as MoReL's halt-state reward floor."""
+        return getattr(self, "_min_r", None)
+
+    def precompute_term_stats(self, dataset: Transition, rng: jax.Array) -> None:
+        """Compute and store MoReL's halt-penalty statistics (``discrepancy``, ``min_r``).
+
+        Concrete on the base class — it only needs ``predict_ensemble`` — so every
+        subclass inherits it. Expensive (sweeps the dataset); call once after
+        ``train()``. Subclasses persist the results via ``checkpoint_state()``.
+        """
+        from mbrl.world_models.term_stats import compute_model_discrepancy
+
+        self._discrepancy: float | None = compute_model_discrepancy(self, dataset, rng)
+        self._min_r: float | None = float(jnp.min(dataset.reward))
+
     @abstractmethod
     def step(
         self,

@@ -4,6 +4,8 @@ The unified EnsembleMLP (backprop + eggroll trainers) is covered in
 test_ensemble_mlp.py; termination functions in test_termination_fns.py.
 """
 
+import pickle
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -11,6 +13,7 @@ from omegaconf import OmegaConf
 import pytest
 
 from mbrl.data import Transition
+from mbrl.world_models.term_stats import compute_model_discrepancy
 from mbrl.world_models.unifloral_ensemble_mlp import EnsembleDynamicsModel, UnifloralEnsembleMLP
 
 # Small dims for fast tests
@@ -19,6 +22,7 @@ ACT_DIM = 2
 NUM_ENSEMBLE = 3
 NUM_ELITES = 2
 N = 200  # transitions
+DATASET_ID = "mujoco/halfcheetah/medium-v0"
 
 FAST_CFG = OmegaConf.create(
     {
@@ -179,3 +183,48 @@ class TestUnifloralEnsembleMLPStep:
         out3 = trained_ensemble.step(obs, action, jax.random.key(8))
         assert jnp.array_equal(out1[0], out2[0])
         assert not jnp.array_equal(out1[0], out3[0])
+
+
+class TestTermStats:
+    def test_precompute_values(self, trained_ensemble, synthetic_dataset):
+        assert trained_ensemble.discrepancy is None and trained_ensemble.min_r is None
+        trained_ensemble.precompute_term_stats(synthetic_dataset, jax.random.key(3))
+        assert trained_ensemble.discrepancy is not None
+        assert trained_ensemble.discrepancy > 0
+        assert jnp.isclose(trained_ensemble.min_r, float(jnp.min(synthetic_dataset.reward)))
+
+    def test_discrepancy_deterministic(self, trained_ensemble, synthetic_dataset):
+        d1 = compute_model_discrepancy(trained_ensemble, synthetic_dataset, jax.random.key(5))
+        d2 = compute_model_discrepancy(trained_ensemble, synthetic_dataset, jax.random.key(5))
+        assert jnp.isclose(d1, d2)
+
+    def test_checkpoint_roundtrip_carries_stats(
+        self, trained_ensemble, synthetic_dataset, tmp_path
+    ):
+        trained_ensemble.precompute_term_stats(synthetic_dataset, jax.random.key(3))
+        ckpt = {
+            **trained_ensemble.checkpoint_state(),
+            "obs_dim": OBS_DIM, "act_dim": ACT_DIM, "dataset_id": DATASET_ID,
+            "world_model_cfg": OmegaConf.to_container(FAST_CFG),
+        }
+        path = tmp_path / "wm.pkl"
+        with open(path, "wb") as f:
+            pickle.dump(ckpt, f)
+        reloaded = UnifloralEnsembleMLP.load_from_checkpoint(path)
+        assert jnp.isclose(reloaded.discrepancy, trained_ensemble.discrepancy)
+        assert jnp.isclose(reloaded.min_r, trained_ensemble.min_r)
+
+    def test_old_checkpoint_loads_none(self, trained_ensemble, tmp_path):
+        """A checkpoint written before term stats existed lacks the keys → None."""
+        ckpt = {
+            **trained_ensemble.checkpoint_state(),
+            "obs_dim": OBS_DIM, "act_dim": ACT_DIM, "dataset_id": DATASET_ID,
+            "world_model_cfg": OmegaConf.to_container(FAST_CFG),
+        }
+        ckpt.pop("discrepancy", None)
+        ckpt.pop("min_r", None)
+        path = tmp_path / "old.pkl"
+        with open(path, "wb") as f:
+            pickle.dump(ckpt, f)
+        reloaded = UnifloralEnsembleMLP.load_from_checkpoint(path)
+        assert reloaded.discrepancy is None and reloaded.min_r is None
