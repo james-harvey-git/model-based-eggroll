@@ -132,6 +132,9 @@ class EnsembleMLP(EnsembleDynamics):
         self._update_steps_completed: int = 0
         self._validation_split: float | None = None
         self._seed: int | None = None
+        # MoReL halt-penalty stats; populated by precompute_term_stats() / load.
+        self._discrepancy: float | None = None
+        self._min_r: float | None = None
 
     # ── network init / inference ─────────────────────────────────────────────
 
@@ -235,6 +238,8 @@ class EnsembleMLP(EnsembleDynamics):
             "update_steps_completed": self._update_steps_completed,
             "validation_split": self._validation_split,
             "seed": self._seed,
+            "discrepancy": self._discrepancy,
+            "min_r": self._min_r,
         }
 
     @classmethod
@@ -256,6 +261,9 @@ class EnsembleMLP(EnsembleDynamics):
         instance._update_steps_completed = int(ckpt.get("update_steps_completed", 0))
         instance._validation_split = ckpt.get("validation_split")
         instance._seed = ckpt.get("seed")
+        # .get for back-compat with checkpoints saved before term stats existed.
+        instance._discrepancy = ckpt.get("discrepancy")
+        instance._min_r = ckpt.get("min_r")
         return instance
 
     # ── training ─────────────────────────────────────────────────────────────

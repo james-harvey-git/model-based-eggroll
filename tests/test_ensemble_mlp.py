@@ -14,6 +14,7 @@ from mbrl.experiments import world_model as world_model_exp
 from mbrl.logger import Logger
 import mbrl.world_models.ensemble_mlp as ensemble_mlp_mod
 from mbrl.world_models.ensemble_mlp import EnsembleMLP
+from mbrl.world_models.term_stats import compute_model_discrepancy
 
 OBS_DIM = 4
 ACT_DIM = 2
@@ -374,3 +375,45 @@ def _roundtrip(model, cfg, tmp_path):
     mb, sb = reloaded.predict_ensemble(obs, action)
     assert jnp.allclose(ma, mb) and jnp.allclose(sa, sb)
     assert jnp.array_equal(reloaded._elite_idxs, model._elite_idxs)
+
+
+class TestTermStats:
+    """MoReL halt-penalty stats are precomputed and survive a checkpoint round-trip.
+
+    Stats work identically for both trainers (shared base implementation); the
+    eggroll path is the same code, so backprop coverage here is sufficient.
+    """
+
+    def test_precompute_and_checkpoint(self, synthetic_dataset, tmp_path):
+        model = _train(_backprop_cfg(), synthetic_dataset, 0)
+        assert model.discrepancy is None and model.min_r is None
+
+        model.precompute_term_stats(synthetic_dataset, jax.random.key(3))
+        assert model.discrepancy is not None and model.discrepancy > 0
+        assert jnp.isclose(model.min_r, float(jnp.min(synthetic_dataset.reward)))
+
+        # Deterministic for a fixed key.
+        d2 = compute_model_discrepancy(model, synthetic_dataset, jax.random.key(3))
+        assert jnp.isclose(model.discrepancy, d2)
+
+        # Checkpoint round-trip carries the stats.
+        path = _write_ckpt(model, _backprop_cfg(), tmp_path)
+        reloaded = EnsembleMLP.load_from_checkpoint(path)
+        assert reloaded.discrepancy is not None and reloaded.min_r is not None
+        assert jnp.isclose(reloaded.discrepancy, model.discrepancy)
+        assert jnp.isclose(reloaded.min_r, model.min_r)
+
+    def test_old_checkpoint_loads_none(self, backprop_model, tmp_path):
+        """A checkpoint written before term stats existed lacks the keys → None."""
+        ckpt = {
+            **backprop_model.checkpoint_state(),
+            "obs_dim": OBS_DIM, "act_dim": ACT_DIM, "dataset_id": DATASET_ID,
+            "world_model_cfg": OmegaConf.to_container(_backprop_cfg()), "wm_group": "g",
+        }
+        ckpt.pop("discrepancy", None)
+        ckpt.pop("min_r", None)
+        path = tmp_path / "old.pkl"
+        with open(path, "wb") as f:
+            pickle.dump(ckpt, f)
+        reloaded = EnsembleMLP.load_from_checkpoint(path)
+        assert reloaded.discrepancy is None and reloaded.min_r is None

@@ -88,6 +88,15 @@ def run(cfg: DictConfig, logger: Logger) -> None:
 
     world_model.train(dataset, cfg.world_model, train_rng, log_fn=log_fn)
 
+    # Precompute MoReL's halt-penalty statistics (discrepancy, min_r) so policy
+    # training with MoReL can read them off the checkpoint. Opt-in and expensive
+    # (O(N^2) over the dataset), so gated behind a config flag.
+    if cfg.world_model.get("precompute_term_stats", False):
+        rng, stats_rng = jax.random.split(rng)
+        print("Precomputing MoReL term stats (discrepancy, min_r)...")
+        world_model.precompute_term_stats(dataset, stats_rng)
+        print(f"  discrepancy={world_model.discrepancy:.6f}  min_r={world_model.min_r:.6f}")
+
     common = {
         "obs_dim": info.obs_dim,
         "act_dim": info.act_dim,

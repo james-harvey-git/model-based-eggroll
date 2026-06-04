@@ -1,4 +1,22 @@
 _target_: mbrl.policy_optimizers.morel.train
 
-threshold: 0.5
-num_policy_updates: 1000
+# SAC hyperparameters (shared with sac_n module)
+lr: 1e-4
+batch_size: 256
+gamma: 0.99
+polyak_step_size: 0.005
+num_critics: 10
+
+# World-model rollouts
+rollout_length: 5
+rollout_interval: 1000
+rollout_batch_size: 50000
+model_retain_epochs: 5
+dataset_sample_ratio: 0.01        # MoReL default (Unifloral uses 0.01, vs MOPO's 0.05)
+num_policy_updates: 3_000_000
+eval_interval: 5000
+
+# MoReL-specific (halt-state penalty). Requires the world model to be trained with
+# precompute_term_stats=true so discrepancy/min_r are in the checkpoint.
+threshold_coef: 1.0               # halt when per-state disagreement > discrepancy * this
+term_penalty_offset: -200         # halted reward = min_r + this

@@ -15,3 +15,7 @@ batch_size: 256
 weight_decay: 2.5e-5
 logvar_diff_coef: 0.01
 validation_split: 0.2
+
+# Precompute MoReL halt-penalty stats (discrepancy, min_r) into the checkpoint.
+# Expensive O(N^2) one-off; enable only when this world model feeds MoReL.
+precompute_term_stats: false
