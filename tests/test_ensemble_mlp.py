@@ -580,6 +580,27 @@ class TestEnsembleMLPTrajectory:
         )
         assert not jnp.array_equal(unfrozen._params["max_logvar"], ckpt_max)
 
+    def test_use_mse_fitness_changes_optimisation(
+        self, backprop_model, synthetic_dataset, tmp_path
+    ):
+        """The MSE-fitness diagnostic trains and infers, and with the same seed evolves
+        params different from the NLL fitness — i.e. the fitness path actually changed."""
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        eps = _toy_episodes()
+        nll = _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt), use_mse_fitness=False, num_epochs=5),
+            synthetic_dataset, eps, 0,
+        )
+        mse = _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt), use_mse_fitness=True, num_epochs=5),
+            synthetic_dataset, eps, 0,
+        )
+        _assert_inference_ok(mse)
+        assert any(
+            not jnp.array_equal(x, y)
+            for x, y in zip(jax.tree.leaves(nll._params), jax.tree.leaves(mse._params))
+        )
+
     def test_curriculum_runs_and_counts(self, backprop_model, synthetic_dataset, tmp_path):
         ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
         step_offset = backprop_model._update_steps_completed

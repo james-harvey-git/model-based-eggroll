@@ -651,6 +651,10 @@ class EnsembleMLP(EnsembleDynamics):
         assert log_interval > 0 and full_validation_interval > 0
         coef = float(cfg.get("logvar_diff_coef", 0.01))
         freeze_clamp = bool(cfg.get("freeze_logvar_clamp", False))
+        # Diagnostic: drive the fitness by pure trajectory MSE (mean head only), dropping the
+        # NLL precision weighting and the logvar terms. The variance head then receives no
+        # fitness signal and drifts on noise, so this is for analysis, not production fine-tuning.
+        use_mse = bool(cfg.get("use_mse_fitness", False))
         log_transition = bool(cfg.get("val_transition_mse", True))
         log_disagreement = bool(cfg.get("log_ensemble_disagreement", False))
         n_ens = self.num_ensemble
@@ -750,17 +754,23 @@ class EnsembleMLP(EnsembleDynamics):
                         next_obs = carry_obs + mean[:-1]
                         # Absolute-state match: effective obs delta target is (real_next - ô).
                         tgt = jnp.concatenate([tgt_o - carry_obs, tgt_r[None]])
-                        nll = jnp.mean((mean - tgt) ** 2 * jnp.exp(-logvar)) + jnp.mean(logvar)
+                        if use_mse:  # diagnostic: mean head only, no precision weighting
+                            loss_t = jnp.mean((mean - tgt) ** 2)
+                        else:
+                            loss_t = jnp.mean((mean - tgt) ** 2 * jnp.exp(-logvar)) + jnp.mean(
+                                logvar
+                            )
                         # NaN-safe mask: a padded forward on garbage carry may be non-finite,
                         # and 0 * NaN = NaN would poison the accumulated fitness.
-                        return next_obs, (jnp.where(m > 0, nll, 0.0), maxlv, minlv)
+                        return next_obs, (jnp.where(m > 0, loss_t, 0.0), maxlv, minlv)
 
                     _, (nlls, maxlv, minlv) = jax.lax.scan(
                         step, start_obs,
                         (actions_w, target_obs_w, target_reward_w, mask_w),
                     )
                     loss = jnp.sum(nlls)
-                    if not freeze_clamp:  # clamp regulariser added once per rollout
+                    # No clamp regulariser under MSE fitness: the variance head is out of the loss.
+                    if not freeze_clamp and not use_mse:  # clamp regulariser added once per rollout
                         loss = loss + coef * jnp.sum(maxlv[0] - minlv[0])
                     return loss
 

@@ -27,6 +27,9 @@ batch_size: 4                     # trajectory windows per generation (shared ac
 
 logvar_diff_coef: 0.01            # lambda; clamp regulariser added once per rollout
 freeze_logvar_clamp: false        # ablation: hold max/min_logvar at Phase-1 values (no perturb, no update)
+# Diagnostic only: fitness = pure trajectory MSE (mean head), dropping NLL precision
+# weighting + logvar terms. The variance head then drifts on noise; not for production runs.
+use_mse_fitness: false
 
 trajectory_validation_split: 0.2  # episode-level held-out fraction (trajectory val MSE)
 val_transition_mse: true          # also log the comparable one-step val MSE (toggle off if slow)
