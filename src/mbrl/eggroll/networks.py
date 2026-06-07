@@ -233,8 +233,15 @@ class DynamicsNet(Model):
         iterinfo,
         obs: jax.Array,
         action: jax.Array,
+        freeze_clamp_bounds: bool = False,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-        """Private helper returning bounds alongside predictions for training losses."""
+        """Private helper returning bounds alongside predictions for training losses.
+
+        ``freeze_clamp_bounds`` evaluates the learnable ``max_logvar``/``min_logvar`` at their
+        *unperturbed* values (i.e. as if ``iterinfo=None`` for those leaves), so an EGGROLL
+        trajectory fine-tune can hold the logvar clamp fixed at its Phase-1 calibration — a
+        true freeze, not merely excluding it from the update.
+        """
         return cls._forward_with_bounds(
             CommonParams(
                 noiser,
@@ -247,6 +254,7 @@ class DynamicsNet(Model):
             ),
             obs,
             action,
+            freeze_clamp_bounds=freeze_clamp_bounds,
         )
 
     @classmethod
@@ -255,6 +263,7 @@ class DynamicsNet(Model):
         common_params: CommonParams,
         obs: jax.Array,
         action: jax.Array,
+        freeze_clamp_bounds: bool = False,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         """Forward pass returning mean, logvar, max_logvar, and min_logvar."""
         obs_action = jnp.concatenate([obs, action], axis=-1)
@@ -270,9 +279,16 @@ class DynamicsNet(Model):
         half = output.shape[-1] // 2
         mean, raw_logvar = output[:half], output[half:]
 
-        # Soft-clamp log-variance to prevent unbounded growth (matching mle.py)
-        max_logvar = call_submodule(Parameter, "max_logvar", common_params)
-        min_logvar = call_submodule(Parameter, "min_logvar", common_params)
+        # Soft-clamp log-variance to prevent unbounded growth. When freezing the clamp,
+        # read the bounds with iterinfo=None so they are never perturbed (held at their
+        # Phase-1 values).
+        clamp_params = (
+            common_params._replace(iterinfo=None)
+            if freeze_clamp_bounds
+            else common_params
+        )
+        max_logvar = call_submodule(Parameter, "max_logvar", clamp_params)
+        min_logvar = call_submodule(Parameter, "min_logvar", clamp_params)
         logvar = max_logvar - jax.nn.softplus(max_logvar - raw_logvar)
         logvar = min_logvar + jax.nn.softplus(logvar - min_logvar)
 

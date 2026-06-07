@@ -188,6 +188,11 @@ def _define_step_metrics() -> None:
     wandb.define_metric("world_model/transitions_seen")
     for metric in ("world_model/val_mse", "world_model/val_mse_elite", "world_model/train_loss"):
         wandb.define_metric(metric, step_metric="world_model/transitions_seen")
+    # Phase-2 (trajectory fine-tuning) gets its own generation axis: in a combined
+    # backprop->trajectory run both phases share the W&B run, and Phase-2's generation
+    # counter restarts near zero, which would be dropped against the Phase-1 axis.
+    wandb.define_metric("world_model_ft/generation")
+    wandb.define_metric("world_model_ft/*", step_metric="world_model_ft/generation")
     wandb.define_metric("policy/step")
     wandb.define_metric("policy/*", step_metric="policy/step")
 
@@ -280,6 +285,21 @@ class Logger:
         if not self.enabled:
             return
         wandb.log({f"world_model/{k}": v for k, v in metrics.items()}, step=step)
+
+    def log_world_model_finetune_step(self, generation: int, **metrics: float) -> None:
+        """Log Phase-2 (trajectory EGGROLL) metrics on the ``world_model_ft`` axis.
+
+        Logs ``generation`` as the ``world_model_ft/generation`` field (its custom step
+        metric) rather than W&B's global step, so in a combined backprop->trajectory run
+        Phase-2's generation count (restarting near zero) is not rejected as non-monotonic
+        against the Phase-1 axis.
+        """
+        if not self.enabled:
+            return
+        wandb.log(
+            {f"world_model_ft/{k}": v for k, v in metrics.items()}
+            | {"world_model_ft/generation": generation}
+        )
 
     def log_policy_step(self, step: int, **metrics: float) -> None:
         """Log policy training metrics (return, entropy, critic loss, etc.).

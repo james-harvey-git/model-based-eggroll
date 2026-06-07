@@ -27,6 +27,11 @@ init_checkpoint: null             # path to an EnsembleMLP checkpoint to fine-tu
 reset_optax_state: true          # carry the optimiser state across fine-tuning unless true
 seed: null                        # set from top-level cfg.seed by experiments/world_model.py
 
+# When true, run Phase-2 trajectory EGGROLL fine-tuning after this backprop pretrain,
+# in one invocation, reusing the separate `finetune_world_model` (eggroll_trajectory)
+# config and auto-handing off this run's checkpoint. See experiments/world_model.py.
+finetune: false
+
 # Precompute MoReL halt-penalty stats (discrepancy, min_r) into the checkpoint.
 # Expensive O(N^2) one-off; enable only when this world model feeds MoReL.
 precompute_term_stats: false

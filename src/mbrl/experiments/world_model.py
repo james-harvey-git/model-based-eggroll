@@ -9,51 +9,46 @@ from hydra.utils import get_class
 import jax
 from omegaconf import DictConfig, OmegaConf
 
-from mbrl.data import load_dataset
+from mbrl.data import load_dataset, load_episodes
 from mbrl.logger import Logger
 
+# Architecture fields a Phase-2 trajectory fine-tune must inherit from the Phase-1
+# checkpoint it warm-starts (otherwise the param shapes can't load).
+_ARCH_FIELDS = (
+    "num_ensemble", "num_elites", "hidden_dims", "activation", "init_scheme",
+    "backbone", "max_logvar_init", "min_logvar_init",
+)
 
-def run(cfg: DictConfig, logger: Logger) -> None:
-    """Train a world model and save a checkpoint.
 
-    Configured by cfg.world_model. Checkpoints saved to cfg.checkpoint_dir.
-    Dispatches to the right world model class via cfg.world_model._target_.
-    """
-    rng = jax.random.key(cfg.seed)
-    rng, train_rng = jax.random.split(rng)
+def _check_init_ckpt_dataset(init_ckpt_path, info) -> None:
+    """Guard a warm-start against a dataset / shape mismatch with the loaded dataset."""
+    if init_ckpt_path is None:
+        return
+    with open(init_ckpt_path, "rb") as f:
+        meta = pickle.load(f)
+    if meta["dataset_id"] != info.dataset_id:
+        raise ValueError(
+            f"init_checkpoint dataset_id mismatch: ckpt={meta['dataset_id']!r} "
+            f"vs current dataset={info.dataset_id!r}. Refusing to finetune on a "
+            "different dataset to the one used for pretraining."
+        )
+    if meta["obs_dim"] != info.obs_dim or meta["act_dim"] != info.act_dim:
+        raise ValueError(
+            f"init_checkpoint shape mismatch: ckpt obs/act=({meta['obs_dim']},"
+            f" {meta['act_dim']}) vs dataset=({info.obs_dim}, {info.act_dim})."
+        )
 
-    dataset, info = load_dataset(cfg.dataset.name)
 
-    # When warm-starting EGGROLL from a stage-1 checkpoint, sanity-check that
-    # we're finetuning on the dataset the checkpoint was pretrained on.
-    init_ckpt_path = cfg.world_model.get("init_checkpoint", None)
-    if init_ckpt_path is not None:
-        with open(init_ckpt_path, "rb") as f:
-            _ckpt_meta = pickle.load(f)
-        if _ckpt_meta["dataset_id"] != info.dataset_id:
-            raise ValueError(
-                f"init_checkpoint dataset_id mismatch: ckpt={_ckpt_meta['dataset_id']!r} "
-                f"vs current dataset={info.dataset_id!r}. Refusing to finetune on a "
-                "different dataset to the one used for pretraining."
-            )
-        if _ckpt_meta["obs_dim"] != info.obs_dim or _ckpt_meta["act_dim"] != info.act_dim:
-            raise ValueError(
-                f"init_checkpoint shape mismatch: ckpt obs/act=({_ckpt_meta['obs_dim']},"
-                f" {_ckpt_meta['act_dim']}) vs dataset=({info.obs_dim}, {info.act_dim})."
-            )
+def _plumb_seed(wm_cfg: DictConfig, seed: int) -> None:
+    """Set wm_cfg.seed from the top-level seed when unset (for reproducible splits)."""
+    if "seed" in wm_cfg and wm_cfg.seed is None:
+        OmegaConf.set_struct(wm_cfg, False)
+        wm_cfg.seed = int(seed)
+        OmegaConf.set_struct(wm_cfg, True)
 
-    # Plumb the top-level seed into cfg.world_model so per-class trainers that
-    # need a deterministic seed (e.g. EnsembleMLP, which records it in the
-    # checkpoint so a fine-tune run can replay the train/val split) can read it
-    # from their own cfg without an extra constructor argument.
-    if "seed" in cfg.world_model and cfg.world_model.seed is None:
-        OmegaConf.set_struct(cfg.world_model, False)
-        cfg.world_model.seed = int(cfg.seed)
-        OmegaConf.set_struct(cfg.world_model, True)
 
-    wm_cls = get_class(cfg.world_model._target_)
-    world_model = wm_cls(info.obs_dim, info.act_dim, info.dataset_id, cfg.world_model)
-    start_time = time.perf_counter()
+def _make_onestep_log_fn(logger: Logger, start_time: float):
+    """Positional log fn for the one-step trainers (backprop / eggroll)."""
 
     def log_fn(
         step: int,
@@ -86,32 +81,126 @@ def run(cfg: DictConfig, logger: Logger) -> None:
         metrics["wall_time_sec"] = time.perf_counter() - start_time
         logger.log_world_model_step(int(step), **metrics)
 
-    world_model.train(dataset, cfg.world_model, train_rng, log_fn=log_fn)
+    return log_fn
 
-    # Precompute MoReL's halt-penalty statistics (discrepancy, min_r) so policy
-    # training with MoReL can read them off the checkpoint. Opt-in and expensive
-    # (O(N^2) over the dataset), so gated behind a config flag.
+
+def _make_traj_log_fn(logger: Logger, start_time: float):
+    """(generation, **metrics) log fn for Phase-2 (its own ``world_model_ft`` axis)."""
+
+    def log_fn(generation: int, **metrics: float) -> None:
+        metrics["wall_time_sec"] = time.perf_counter() - start_time
+        logger.log_world_model_finetune_step(int(generation), **metrics)
+
+    return log_fn
+
+
+def _save_checkpoint(
+    path: Path, world_model, wm_cfg: DictConfig, info, logger: Logger, lineage
+) -> None:
+    """Write an EnsembleDynamics checkpoint (class recovered on load from _target_)."""
+    common = {
+        "obs_dim": info.obs_dim,
+        "act_dim": info.act_dim,
+        "dataset_id": info.dataset_id,
+        "world_model_cfg": OmegaConf.to_container(wm_cfg),
+        "wm_group": logger.wm_group,
+        "finetune_lineage": lineage,
+    }
+    checkpoint = {**common, **world_model.checkpoint_state()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        pickle.dump(checkpoint, f)
+
+
+def _train_model(wm_cfg: DictConfig, dataset, info, rng, log_fn, episodes=None):
+    """Instantiate and train one world model (class via wm_cfg._target_).
+
+    ``episodes`` is passed only for the trajectory trainer; other world-model classes
+    (and the ABC) take no such kwarg, so omit it when None.
+    """
+    world_model = get_class(wm_cfg._target_)(
+        info.obs_dim, info.act_dim, info.dataset_id, wm_cfg
+    )
+    if episodes is None:
+        world_model.train(dataset, wm_cfg, rng, log_fn=log_fn)
+    else:
+        world_model.train(dataset, wm_cfg, rng, log_fn=log_fn, episodes=episodes)
+    return world_model
+
+
+def run(cfg: DictConfig, logger: Logger) -> None:
+    """Train a world model and save a checkpoint to cfg.checkpoint_dir.
+
+    Three modes, dispatched from cfg.world_model:
+    - **Combined two-phase** (``world_model.finetune=true``): backprop pretrain, then
+      trajectory EGGROLL fine-tune (the separate ``finetune_world_model`` config) with the
+      Phase-1 checkpoint auto-handed off.
+    - **Standalone Phase 2** (``trainer=eggroll_trajectory``): a single trajectory fine-tune
+      from an explicit ``init_checkpoint``.
+    - **Single-phase** (otherwise): one backprop or eggroll training run (unchanged).
+    """
+    rng = jax.random.key(cfg.seed)
+    dataset, info = load_dataset(cfg.dataset.name)
+    ckpt_dir = Path(cfg.checkpoint_dir)
+
+    if bool(cfg.world_model.get("finetune", False)):
+        # ── Phase 1: backprop pretrain ──────────────────────────────────────────
+        _plumb_seed(cfg.world_model, cfg.seed)
+        _check_init_ckpt_dataset(cfg.world_model.get("init_checkpoint", None), info)
+        rng, p1_rng = jax.random.split(rng)
+        wm1 = _train_model(
+            cfg.world_model, dataset, info, p1_rng,
+            _make_onestep_log_fn(logger, time.perf_counter()),
+        )
+        phase1_path = ckpt_dir / "world_model_phase1.pkl"
+        _save_checkpoint(phase1_path, wm1, cfg.world_model, info, logger, logger.finetune_lineage)
+
+        # ── Phase 2: trajectory fine-tune (separate config, auto-handoff) ───────
+        ft_cfg = cfg.finetune_world_model
+        OmegaConf.set_struct(ft_cfg, False)
+        ft_cfg.init_checkpoint = str(phase1_path)
+        for k in _ARCH_FIELDS:  # arch must match the Phase-1 checkpoint
+            if k in cfg.world_model:
+                ft_cfg[k] = cfg.world_model[k]
+        OmegaConf.set_struct(ft_cfg, True)
+        _plumb_seed(ft_cfg, cfg.seed)
+
+        episodes, _ = load_episodes(cfg.dataset.name)
+        rng, p2_rng = jax.random.split(rng)
+        wm2 = _train_model(
+            ft_cfg, dataset, info, p2_rng,
+            _make_traj_log_fn(logger, time.perf_counter()), episodes=episodes,
+        )
+        if ft_cfg.get("precompute_term_stats", False):
+            rng, stats_rng = jax.random.split(rng)
+            print("Precomputing MoReL term stats (discrepancy, min_r)...")
+            wm2.precompute_term_stats(dataset, stats_rng)
+            print(f"  discrepancy={wm2.discrepancy:.6f}  min_r={wm2.min_r:.6f}")
+        lineage = f"{cfg.world_model.trainer}->{ft_cfg.trainer}"
+        _save_checkpoint(ckpt_dir / "world_model.pkl", wm2, ft_cfg, info, logger, lineage)
+        return
+
+    # ── Single-phase (backprop, eggroll, or standalone eggroll_trajectory) ──────
+    _plumb_seed(cfg.world_model, cfg.seed)
+    _check_init_ckpt_dataset(cfg.world_model.get("init_checkpoint", None), info)
+    is_traj = str(cfg.world_model.get("trainer", "")) == "eggroll_trajectory"
+    rng, train_rng = jax.random.split(rng)
+    if is_traj:
+        episodes, _ = load_episodes(cfg.dataset.name)
+        log_fn = _make_traj_log_fn(logger, time.perf_counter())
+    else:
+        episodes, log_fn = None, _make_onestep_log_fn(logger, time.perf_counter())
+    world_model = _train_model(cfg.world_model, dataset, info, train_rng, log_fn, episodes)
+
+    # Precompute MoReL's halt-penalty statistics (discrepancy, min_r) if requested.
+    # Opt-in and expensive (O(N^2)); only needed when this model feeds MoReL.
     if cfg.world_model.get("precompute_term_stats", False):
         rng, stats_rng = jax.random.split(rng)
         print("Precomputing MoReL term stats (discrepancy, min_r)...")
         world_model.precompute_term_stats(dataset, stats_rng)
         print(f"  discrepancy={world_model.discrepancy:.6f}  min_r={world_model.min_r:.6f}")
 
-    common = {
-        "obs_dim": info.obs_dim,
-        "act_dim": info.act_dim,
-        "dataset_id": info.dataset_id,
-        "world_model_cfg": OmegaConf.to_container(cfg.world_model),
-        "wm_group": logger.wm_group,
-        # Carried so a fine-tune of this checkpoint can extend the lineage chain.
-        "finetune_lineage": logger.finetune_lineage,
-    }
-
-    # Every world-model class exposes checkpoint_state(); the class is recovered on
-    # load from world_model_cfg._target_, so no per-class branching is needed here.
-    checkpoint = {**common, **world_model.checkpoint_state()}
-
-    checkpoint_path = Path(cfg.checkpoint_dir) / "world_model.pkl"
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(checkpoint_path, "wb") as f:
-        pickle.dump(checkpoint, f)
+    _save_checkpoint(
+        ckpt_dir / "world_model.pkl", world_model, cfg.world_model, info, logger,
+        logger.finetune_lineage,
+    )

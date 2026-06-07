@@ -1,6 +1,10 @@
 defaults:
   - dataset: halfcheetah_medium
   - world_model: ensemble_mlp_eggroll
+  # Phase-2 config for combined backprop->trajectory fine-tuning runs. Composed into
+  # its own key; only consumed when world_model.finetune=true (harmless otherwise).
+  # Override Phase-2 settings under the finetune_world_model. prefix.
+  - world_model@finetune_world_model: eggroll_trajectory
   - policy_optimizer: mopo
   - networks: mlp
   - _self_

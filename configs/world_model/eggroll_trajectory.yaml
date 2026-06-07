@@ -1,0 +1,60 @@
+_target_: mbrl.world_models.ensemble_mlp.EnsembleMLP
+trainer: eggroll_trajectory
+
+# Architecture must match the Phase-1 checkpoint being fine-tuned. In a combined
+# pipeline (world_model.finetune=true) experiments/world_model.py overrides these to
+# the Phase-1 values; they matter on their own only for a standalone Phase-2 run.
+num_ensemble: 7
+num_elites: 5
+hidden_dims: [200, 200, 200, 200]
+activation: pqn
+init_scheme: eggroll
+backbone: mlp                      # mlp | residual_mlp
+max_logvar_init: 0.5
+min_logvar_init: -10.0
+
+# Phase-1 checkpoint to fine-tune. Auto-set from the Phase-1 output in a combined
+# pipeline; set explicitly for a standalone Phase-2 run.
+init_checkpoint: null
+reset_optax_state: true           # fresh optimiser for the new (trajectory) objective
+
+num_epochs: 10000                 # EGGROLL generations (placeholder; tune empirically)
+horizon: 5                        # rollout length T; ignored if `curriculum` is set
+# Optional in-process horizon curriculum (re-tiles + carries params across stages):
+#   curriculum: [{horizon: 3, num_epochs: 3000}, {horizon: 6, num_epochs: 7000}]
+curriculum: null
+batch_size: 4                     # trajectory windows per generation (shared across population)
+
+logvar_diff_coef: 0.01            # lambda; clamp regulariser added once per rollout
+freeze_logvar_clamp: false        # ablation: hold max/min_logvar at Phase-1 values (no perturb, no update)
+
+trajectory_validation_split: 0.2  # episode-level held-out fraction (trajectory val MSE)
+val_transition_mse: true          # also log the comparable one-step val MSE (toggle off if slow)
+log_ensemble_disagreement: true   # log cross-member std at start/end (diversity sanity check)
+
+log_interval: 50
+full_validation_interval: 500
+
+eggroll:
+  population_size: 256            # per member; must be even (antithetic +/-sigma pairs)
+  solver: sgd
+  solver_kwargs: {}
+  noise_reuse: 1
+  sigma: 0.01                     # to be swept
+  # Decays sigma to ~5% of its initial value by num_epochs=10000 (0.05 ** (1/10000)).
+  # Recompute by hand if num_epochs changes.
+  sigma_decay_rate: 0.9997
+  sigma_schedule: exponential     # constant | exponential | cosine | linear
+  sigma_schedule_kwargs: {}
+  lr: 0.01
+  lr_schedule: constant
+  lr_schedule_kwargs: {}
+  use_batched_update: true
+  # No group_size: with the decoupled batch every perturbation sees the same windows,
+  # so grouping has no effect; the noiser is initialised with group_size=0.
+
+seed: null                        # set from top-level cfg.seed by experiments/world_model.py
+
+# MoReL halt-penalty stats (discrepancy, min_r). For a two-phase pipeline these are
+# computed only after Phase 2 (the trunk shifts during fine-tuning); MOPO needs none.
+precompute_term_stats: false
