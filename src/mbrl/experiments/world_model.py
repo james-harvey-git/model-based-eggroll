@@ -85,9 +85,16 @@ def _make_onestep_log_fn(logger: Logger, start_time: float):
 
 
 def _make_traj_log_fn(logger: Logger, start_time: float):
-    """(generation, **metrics) log fn for Phase-2 (its own ``world_model_ft`` axis)."""
+    """(generation, **metrics) log fn for Phase-2 (its own ``world_model_ft`` axis).
 
-    def log_fn(generation: int, **metrics: float) -> None:
+    The reserved ``val_traj_mse_curve`` key (a per-rollout-step list) is routed to a single
+    line-chart panel rather than logged as scalars.
+    """
+
+    def log_fn(generation: int, **metrics) -> None:
+        curve = metrics.pop("val_traj_mse_curve", None)
+        if curve is not None:
+            logger.log_world_model_finetune_curve("val_traj_mse_curve", curve)
         metrics["wall_time_sec"] = time.perf_counter() - start_time
         logger.log_world_model_finetune_step(int(generation), **metrics)
 

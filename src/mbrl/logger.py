@@ -301,6 +301,22 @@ class Logger:
             | {"world_model_ft/generation": generation}
         )
 
+    def log_world_model_finetune_curve(self, name: str, ys) -> None:
+        """Log a per-rollout-step curve (e.g. trajectory MSE vs horizon) as one line panel.
+
+        Avoids cluttering the dashboard with one scalar panel per horizon step; the curve is
+        a single ``world_model_ft/<name>`` line chart (x = rollout step, y = value).
+        """
+        if not self.enabled:
+            return
+        table = wandb.Table(
+            data=[[i + 1, float(y)] for i, y in enumerate(ys)],
+            columns=["rollout_step", "mse"],
+        )
+        wandb.log(
+            {f"world_model_ft/{name}": wandb.plot.line(table, "rollout_step", "mse", title=name)}
+        )
+
     def log_policy_step(self, step: int, **metrics: float) -> None:
         """Log policy training metrics (return, entropy, critic loss, etc.).
 

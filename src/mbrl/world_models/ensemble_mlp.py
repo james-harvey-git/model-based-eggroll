@@ -864,9 +864,12 @@ class EnsembleMLP(EnsembleDynamics):
         # Final per-step MSE-vs-step curve (headline) + end-of-run disagreement.
         if log_fn is not None:
             curve_mean = curve.mean(axis=0)  # (T,) all-member mean per horizon step
-            metrics = {
-                f"val_traj_mse_h{t + 1}": float(curve_mean[t])
-                for t in range(int(curve_mean.shape[0]))
+            # The per-step compounding-error curve goes to a single line panel (see
+            # Logger.log_world_model_finetune_curve), not T separate scalar metrics.
+            metrics: dict = {
+                "val_traj_mse_curve": [
+                    float(curve_mean[t]) for t in range(int(curve_mean.shape[0]))
+                ]
             }
             if log_disagreement:
                 metrics["ensemble_disagreement"] = float(
@@ -1017,14 +1020,14 @@ def _emit_traj_log(
     def _train_cb(step_i, nll_i, lr_i, sigma_i) -> None:
         s = int(step_i)
         log_fn(
-            s + step_offset, train_nll=float(nll_i), lr=float(lr_i), sigma=float(sigma_i),
+            s + step_offset, train_loss=float(nll_i), lr=float(lr_i), sigma=float(sigma_i),
             transitions_seen=_ts(s), forward_evals=_fe(s),
         )
 
     def _val_cb(step_i, nll_i, tj_i, tj_e_i, tr_i, tr_e_i, lr_i, sigma_i) -> None:
         s = int(step_i)
         metrics = dict(
-            train_nll=float(nll_i), val_traj_mse=float(tj_i),
+            train_loss=float(nll_i), val_traj_mse=float(tj_i),
             val_traj_mse_elite=float(tj_e_i), lr=float(lr_i), sigma=float(sigma_i),
             transitions_seen=_ts(s), forward_evals=_fe(s),
         )

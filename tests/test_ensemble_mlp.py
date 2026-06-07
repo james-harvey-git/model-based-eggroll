@@ -546,9 +546,11 @@ class TestEnsembleMLPTrajectory:
         keys = set().union(*(r.keys() for r in rows))
         assert "val_traj_mse" in keys and "val_traj_mse_elite" in keys
         assert "val_transition_mse" in keys and "val_transition_mse_elite" in keys
-        # NLL only appears as a training diagnostic, never on validation.
-        assert "train_nll" in keys
-        assert not any("nll" in k and k != "train_nll" for k in keys)
+        # Training loss is logged as train_loss (Phase-1 naming); validation is MSE-only.
+        assert "train_loss" in keys
+        assert not any("nll" in k for k in keys)
+        # The per-step curve is one reserved key (single line panel), not T h-scalars.
+        assert not any(k.startswith("val_traj_mse_h") for k in keys)
 
     def test_val_transition_toggle_off(self, backprop_model, synthetic_dataset, tmp_path):
         ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
