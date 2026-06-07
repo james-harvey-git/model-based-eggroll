@@ -8,11 +8,11 @@ activation: pqn
 init_scheme: eggroll
 backbone: mlp                     # mlp | residual_mlp
 
-num_epochs: 1000
+num_epochs: 400
 batch_size: 256
 lr: 1e-3
 optimizer: adamw                  # sgd | adam | adamw
-optimizer_kwargs: {eps: 1e-5, weight_decay: 1e-5}  # solver-specific (e.g. {momentum: 0.9} for sgd)
+optimizer_kwargs: {eps: 1e-5, weight_decay: 2.5e-5}  # solver-specific (e.g. {momentum: 0.9} for sgd)
 validation_split: 0.2
 logvar_diff_coef: 0.01
 max_logvar_init: 0.5
