@@ -35,8 +35,8 @@ trajectory_validation_split: 0.2  # episode-level held-out fraction (trajectory 
 val_transition_mse: true          # also log the comparable one-step val MSE (toggle off if slow)
 log_ensemble_disagreement: true   # log cross-member std at start/end (diversity sanity check)
 
-log_interval: 50
-full_validation_interval: 500
+log_interval: 500
+full_validation_interval: 5000
 
 eggroll:
   population_size: 256            # per member; must be even (antithetic +/-sigma pairs)

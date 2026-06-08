@@ -60,7 +60,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8       # JAX data loading + gymnasium vectorized eval workers
-#SBATCH --mem=256G
+#SBATCH --mem=128G
 #SBATCH --gres=gpu:1
 
 # ── Notifications ──────────────────────────────────────────────────────────────
