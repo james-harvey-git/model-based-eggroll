@@ -8,6 +8,10 @@ polyak_step_size: 0.005
 num_critics: 10
 
 # MOPO-specific
+# Uncertainty penalty source: aleatoric (per-member predicted std), epistemic
+# (cross-member disagreement of means), or auto (aleatoric if the world model has a
+# logvar head, else epistemic — required for disable_logvar_predictions models).
+penalty_type: auto
 penalty_coeff: 0.5
 rollout_length: 5
 num_policy_updates: 3_000_000

@@ -211,3 +211,49 @@ class TestExtractActor:
         actor_params, step = extract_actor(runner_state)
         assert isinstance(actor_params, dict)
         assert step == 0
+
+
+# Deterministic (no-logvar) EnsembleMLP: MoReL's penalty (mean-disagreement) and term
+# stats are mean-only, so they must work with no aleatoric head.
+DET_WM_CFG = OmegaConf.create({
+    "trainer": "backprop", "num_ensemble": 3, "num_elites": 2,
+    "hidden_dims": [32, 32], "activation": "relu", "init_scheme": "eggroll",
+    "backbone": "mlp", "num_epochs": 3, "batch_size": 32, "lr": 1e-3,
+    "optimizer": "adamw", "optimizer_kwargs": {}, "validation_split": 0.2,
+    "log_interval": 2, "full_validation_interval": 3, "seed": 0,
+    "disable_logvar_predictions": True,
+})
+
+
+@pytest.fixture(scope="module")
+def deterministic_world_model(synthetic_dataset):
+    from mbrl.world_models.ensemble_mlp import EnsembleMLP
+
+    model = EnsembleMLP(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", DET_WM_CFG)
+    model.train(synthetic_dataset, DET_WM_CFG, jax.random.key(0))
+    model.precompute_term_stats(synthetic_dataset, jax.random.key(1))
+    jax.effects_barrier()
+    return model
+
+
+class TestDeterministicWorldModel:
+    def test_term_stats_precompute(self, deterministic_world_model, synthetic_dataset):
+        """discrepancy/min_r are mean-only, so they compute fine with no logvar head."""
+        assert deterministic_world_model.predicts_logvar is False
+        assert deterministic_world_model.discrepancy is not None
+        assert deterministic_world_model.discrepancy > 0  # members disagree
+        assert jnp.isclose(
+            deterministic_world_model.min_r, float(jnp.min(synthetic_dataset.reward))
+        )
+
+    def test_rollout_fills_buffer(
+        self, deterministic_world_model, synthetic_dataset, agent_state, zero_buffer
+    ):
+        """MoReL rollout (std=None sampling) fills the buffer with finite rewards."""
+        rollout_fn = make_rollout_fn(
+            deterministic_world_model, agent_state.actor.apply_fn,
+            synthetic_dataset.obs, FAST_CFG,
+        )
+        new_buf = rollout_fn(jax.random.key(42), agent_state.actor.params, zero_buffer)
+        assert jnp.any(new_buf.obs != 0)
+        assert jnp.all(jnp.isfinite(new_buf.reward))

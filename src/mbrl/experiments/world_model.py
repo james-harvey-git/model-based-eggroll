@@ -16,7 +16,7 @@ from mbrl.logger import Logger
 # checkpoint it warm-starts (otherwise the param shapes can't load).
 _ARCH_FIELDS = (
     "num_ensemble", "num_elites", "hidden_dims", "activation", "init_scheme",
-    "backbone", "max_logvar_init", "min_logvar_init",
+    "backbone", "max_logvar_init", "min_logvar_init", "disable_logvar_predictions",
 )
 
 

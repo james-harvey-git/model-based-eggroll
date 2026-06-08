@@ -54,6 +54,21 @@ def make_rollout_fn(
     # num_new is a Python int used as a static slice bound in the FIFO insertion.
     num_new = rollout_batch_size * rollout_length
 
+    # Penalty source. "aleatoric" (classic MOPO) uses the per-member predicted std;
+    # "epistemic" uses cross-member disagreement of the means. A deterministic world
+    # model (no logvar head) has no aleatoric std, so it must use the epistemic penalty.
+    penalty_type = str(cfg.get("penalty_type", "auto"))
+    if penalty_type == "auto":
+        penalty_type = "aleatoric" if world_model.predicts_logvar else "epistemic"
+    if penalty_type == "aleatoric" and not world_model.predicts_logvar:
+        raise ValueError(
+            "MOPO penalty_type=aleatoric requires a world model with a log-variance head; "
+            "use penalty_type=epistemic (or auto) for a disable_logvar_predictions model."
+        )
+    if penalty_type not in ("aleatoric", "epistemic"):
+        raise ValueError(f"Unknown MOPO penalty_type={penalty_type!r}.")
+    use_epistemic_penalty = penalty_type == "epistemic"
+
     # Capture bound methods from world model at factory time.
     # predict_ensemble closes over self.params (frozen JAX pytree) and
     # self.model.apply (pure function) — both safe to trace as constants.
@@ -79,13 +94,17 @@ def make_rollout_fn(
             # Get full ensemble predictions for uncertainty penalty
             ensemble_mean, ensemble_std = predict_ensemble(obs, action)
 
-            # Sample from one randomly-selected elite member
+            # Sample from one randomly-selected elite member. For a deterministic model
+            # (ensemble_std is None) the member choice is the only stochasticity (PETS TS).
             num_elites = ensemble_mean.shape[0]
             sample_idx = jax.random.randint(rng_elite, (), 0, num_elites)
             mean = ensemble_mean[sample_idx]
-            std = ensemble_std[sample_idx]
-            noise = jax.random.normal(rng_noise, shape=mean.shape)
-            sample = mean + noise * std
+            if ensemble_std is None:
+                sample = mean
+            else:
+                std = ensemble_std[sample_idx]
+                noise = jax.random.normal(rng_noise, shape=mean.shape)
+                sample = mean + noise * std
 
             # Split into delta_obs and reward.
             # Use indexing (sample[-1]) not slicing (sample[..., -1:]) to get a
@@ -95,9 +114,14 @@ def make_rollout_fn(
             next_obs = obs + delta_obs
             done = termination_fn(obs, action, next_obs)
 
-            # MOPO uncertainty penalty: max over elites of L2 norm of std vector.
-            # Penalises transitions where any ensemble member is highly uncertain.
-            step_penalty = jnp.max(jnp.linalg.norm(ensemble_std, axis=-1))
+            # MOPO uncertainty penalty. Epistemic: L2 norm of the cross-member std of the
+            # mean predictions (the only available signal for deterministic dynamics).
+            # Aleatoric (classic): max over elites of the L2 norm of each member's std.
+            if use_epistemic_penalty:
+                step_penalty = jnp.linalg.norm(jnp.std(ensemble_mean, axis=0))
+            else:
+                assert ensemble_std is not None  # guaranteed by penalty_type resolution
+                step_penalty = jnp.max(jnp.linalg.norm(ensemble_std, axis=-1))
             reward = reward - penalty_coeff * step_penalty
 
             return Transition(obs=obs, action=action, reward=reward, next_obs=next_obs, done=done)
