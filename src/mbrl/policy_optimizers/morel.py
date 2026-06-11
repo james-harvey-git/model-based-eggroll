@@ -98,13 +98,17 @@ def make_rollout_fn(
             # Get full elite ensemble predictions for the disagreement penalty
             ensemble_mean, ensemble_std = predict_ensemble(obs, action)
 
-            # Sample from one randomly-selected elite member
+            # Sample from one randomly-selected elite member. For a deterministic model
+            # (ensemble_std is None) the member choice is the only stochasticity (PETS TS).
             num_elites = ensemble_mean.shape[0]
             sample_idx = jax.random.randint(rng_elite, (), 0, num_elites)
             mean = ensemble_mean[sample_idx]
-            std = ensemble_std[sample_idx]
-            noise = jax.random.normal(rng_noise, shape=mean.shape)
-            sample = mean + noise * std
+            if ensemble_std is None:
+                sample = mean
+            else:
+                std = ensemble_std[sample_idx]
+                noise = jax.random.normal(rng_noise, shape=mean.shape)
+                sample = mean + noise * std
 
             # Split into delta_obs and reward.
             # Use indexing (sample[-1]) not slicing (sample[..., -1:]) to get a

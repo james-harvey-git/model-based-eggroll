@@ -284,3 +284,71 @@ class TestExtractActor:
         new_runner_state, _ = step_fn(runner_state, None)
         _, step = extract_actor(new_runner_state)
         assert step == 1
+
+
+# Deterministic (no-logvar) EnsembleMLP exercises MOPO's epistemic penalty path.
+DET_WM_CFG = OmegaConf.create({
+    "trainer": "backprop", "num_ensemble": 3, "num_elites": 2,
+    "hidden_dims": [32, 32], "activation": "relu", "init_scheme": "eggroll",
+    "backbone": "mlp", "num_epochs": 3, "batch_size": 32, "lr": 1e-3,
+    "optimizer": "adamw", "optimizer_kwargs": {}, "validation_split": 0.2,
+    "log_interval": 2, "full_validation_interval": 3, "seed": 0,
+    "disable_logvar_predictions": True,
+})
+
+
+@pytest.fixture(scope="module")
+def deterministic_world_model(synthetic_dataset):
+    from mbrl.world_models.ensemble_mlp import EnsembleMLP
+
+    model = EnsembleMLP(OBS_DIM, ACT_DIM, "mujoco/halfcheetah/medium-v0", DET_WM_CFG)
+    model.train(synthetic_dataset, DET_WM_CFG, jax.random.key(0))
+    jax.effects_barrier()
+    return model
+
+
+class TestEpistemicPenalty:
+    def test_auto_uses_epistemic_for_deterministic_model(
+        self, deterministic_world_model, synthetic_dataset, agent_state, zero_buffer
+    ):
+        """penalty_type=auto on a no-logvar model rolls out via the epistemic penalty
+        (std=None sampling) without error and fills the buffer."""
+        assert deterministic_world_model.predicts_logvar is False
+        rollout_fn = make_rollout_fn(
+            deterministic_world_model, agent_state.actor.apply_fn,
+            synthetic_dataset.obs, FAST_CFG,  # FAST_CFG has no penalty_type -> auto
+        )
+        new_buf = rollout_fn(jax.random.key(42), agent_state.actor.params, zero_buffer)
+        assert jnp.any(new_buf.obs != 0)
+        assert jnp.all(jnp.isfinite(new_buf.reward))
+
+    def test_explicit_aleatoric_rejected_for_deterministic_model(
+        self, deterministic_world_model, synthetic_dataset, agent_state
+    ):
+        base = OmegaConf.to_container(FAST_CFG)
+        cfg = OmegaConf.create({**base, "penalty_type": "aleatoric"})  # type: ignore[dict-item]
+        with pytest.raises(ValueError, match="aleatoric"):
+            make_rollout_fn(
+                deterministic_world_model, agent_state.actor.apply_fn,
+                synthetic_dataset.obs, cfg,
+            )
+
+    def test_epistemic_penalty_reduces_reward(
+        self, deterministic_world_model, synthetic_dataset, agent_state, zero_buffer
+    ):
+        base = OmegaConf.to_container(FAST_CFG)
+        cfg_no = OmegaConf.create({**base, "penalty_coeff": 0.0})  # type: ignore[arg-type]
+        cfg_hi = OmegaConf.create({**base, "penalty_coeff": 5.0})  # type: ignore[arg-type]
+        rollout_no = make_rollout_fn(
+            deterministic_world_model, agent_state.actor.apply_fn, synthetic_dataset.obs, cfg_no
+        )
+        rollout_hi = make_rollout_fn(
+            deterministic_world_model, agent_state.actor.apply_fn, synthetic_dataset.obs, cfg_hi
+        )
+        rng = jax.random.key(7)
+        buf_no = rollout_no(rng, agent_state.actor.params, zero_buffer)
+        buf_hi = rollout_hi(rng, agent_state.actor.params, zero_buffer)
+        num_new = FAST_CFG.rollout_batch_size * FAST_CFG.rollout_length
+        # Members disagree on this data, so the epistemic penalty is strictly positive
+        # and a higher coeff strictly lowers reward.
+        assert buf_hi.reward[-num_new:].mean() < buf_no.reward[-num_new:].mean()

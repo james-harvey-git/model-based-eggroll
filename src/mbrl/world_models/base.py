@@ -36,6 +36,16 @@ class EnsembleDynamics(ABC):
         """Minimum dataset reward, used as MoReL's halt-state reward floor."""
         return getattr(self, "_min_r", None)
 
+    @property
+    def predicts_logvar(self) -> bool:
+        """Whether the model has an aleatoric (log-variance) head.
+
+        ``False`` for deterministic-dynamics models (no variance head); then
+        :meth:`predict_ensemble` returns ``ensemble_std=None`` and all uncertainty is
+        epistemic (ensemble disagreement). Defaults to ``True``; subclasses override.
+        """
+        return getattr(self, "_predicts_logvar", True)
+
     def precompute_term_stats(self, dataset: Transition, rng: jax.Array) -> None:
         """Compute and store MoReL's halt-penalty statistics (``discrepancy``, ``min_r``).
 
@@ -65,14 +75,15 @@ class EnsembleDynamics(ABC):
         self,
         obs: jnp.ndarray,  # (obs_dim,)
         action: jnp.ndarray,  # (act_dim,)
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> tuple[jnp.ndarray, jnp.ndarray | None]:
         """Return (ensemble_mean, ensemble_std) for all elite members.
 
         Operates on a single (obs, action) pair. Callers vmap over batches.
 
         Returns:
             ensemble_mean: (num_elites, obs_dim + 1) -- predicted delta_obs + reward
-            ensemble_std:  (num_elites, obs_dim + 1)
+            ensemble_std:  (num_elites, obs_dim + 1), or ``None`` when the model has no
+                aleatoric head (``predicts_logvar`` is ``False``).
         """
 
     @abstractmethod

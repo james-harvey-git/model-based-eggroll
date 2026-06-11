@@ -142,6 +142,7 @@ class DynamicsNet(Model):
         backbone: str = "mlp",
         max_logvar_init: float = 0.5,
         min_logvar_init: float = -10.0,
+        predict_logvar: bool = True,
     ) -> CommonInit:
         """Initialise DynamicsNet parameters.
 
@@ -161,6 +162,11 @@ class DynamicsNet(Model):
                 or ``"residual_mlp"`` (pre-activation ResNet blocks).
             max_logvar_init: Initial value for the learnable logvar upper bound.
             min_logvar_init: Initial value for the learnable logvar lower bound.
+            predict_logvar: When True, the head predicts mean + log-variance and the
+                soft-clamp bounds are learnable Parameters. When False (deterministic
+                dynamics, e.g. MuJoCo), the head predicts only mean + reward — there is
+                no variance head and no clamp bounds — and uncertainty comes purely from
+                ensemble disagreement (epistemic).
 
         Returns:
             CommonInit with params structure:
@@ -172,16 +178,22 @@ class DynamicsNet(Model):
             )
         backbone_cls = _BACKBONES[backbone]
         backbone_key, _ = jax.random.split(key)
+        # Deterministic head omits the log-variance half (mean + reward only).
+        out_dim = (2 * (obs_dim + 1)) if predict_logvar else (obs_dim + 1)
         backbone_init = backbone_cls.rand_init(
             backbone_key,
             in_dim=obs_dim + act_dim,
-            out_dim=2 * (obs_dim + 1),
+            out_dim=out_dim,
             hidden_dims=hidden_dims,
             use_bias=use_bias,
             activation=activation,
             dtype=dtype,
             init_scheme=init_scheme,
         )
+        if not predict_logvar:
+            # No variance head → no learnable soft-clamp bounds.
+            merged = merge_inits(backbone=backbone_init)
+            return merge_frozen(merged, backbone_type=backbone, predict_logvar=False)
         # key is reused here because raw_value is provided — the key is never used
         max_logvar = Parameter.rand_init(
             key, shape=None, scale=None,
@@ -198,7 +210,7 @@ class DynamicsNet(Model):
         )
         # Stash backbone choice so _forward_with_bounds dispatches to the right class.
         # Old checkpoints without this key fall back to "mlp" via .get().
-        return merge_frozen(merged, backbone_type=backbone)
+        return merge_frozen(merged, backbone_type=backbone, predict_logvar=True)
 
     @classmethod
     def _forward(
@@ -206,7 +218,7 @@ class DynamicsNet(Model):
         common_params: CommonParams,
         obs: jax.Array,
         action: jax.Array,
-    ) -> tuple[jax.Array, jax.Array]:
+    ) -> tuple[jax.Array, jax.Array | None]:
         """Forward pass: (obs, action) → (mean, logvar).
 
         Args:
@@ -234,7 +246,7 @@ class DynamicsNet(Model):
         obs: jax.Array,
         action: jax.Array,
         freeze_clamp_bounds: bool = False,
-    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, jax.Array | None]:
         """Private helper returning bounds alongside predictions for training losses.
 
         ``freeze_clamp_bounds`` evaluates the learnable ``max_logvar``/``min_logvar`` at their
@@ -264,7 +276,7 @@ class DynamicsNet(Model):
         obs: jax.Array,
         action: jax.Array,
         freeze_clamp_bounds: bool = False,
-    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, jax.Array | None]:
         """Forward pass returning mean, logvar, max_logvar, and min_logvar."""
         obs_action = jnp.concatenate([obs, action], axis=-1)
         # .get(..., "mlp") keeps pre-residual checkpoints loadable; their
@@ -276,6 +288,14 @@ class DynamicsNet(Model):
         )
         backbone_cls = _BACKBONES[backbone_name]
         output = call_submodule(backbone_cls, "backbone", common_params, obs_action)
+        # Deterministic head: the whole output is the mean (+ reward); no variance/bounds.
+        predict_logvar = (
+            common_params.frozen_params.get("predict_logvar", True)
+            if common_params.frozen_params is not None
+            else True
+        )
+        if not predict_logvar:
+            return output, None, None, None
         half = output.shape[-1] // 2
         mean, raw_logvar = output[:half], output[half:]
 

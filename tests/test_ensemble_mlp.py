@@ -86,7 +86,7 @@ def _assert_inference_ok(model, num_elites=NUM_ELITES):
     obs, action = jnp.zeros(OBS_DIM), jnp.zeros(ACT_DIM)
     means, stds = model.predict_ensemble(obs, action)
     assert means.shape == (num_elites, OBS_DIM + 1)
-    assert stds.shape == (num_elites, OBS_DIM + 1)
+    assert stds is not None and stds.shape == (num_elites, OBS_DIM + 1)
     assert jnp.all(jnp.isfinite(means)) and jnp.all(jnp.isfinite(stds))
     next_obs, reward, done = model.step(obs, action, jax.random.key(7))
     assert next_obs.shape == (OBS_DIM,) and reward.shape == () and done.shape == ()
@@ -552,6 +552,22 @@ class TestEnsembleMLPTrajectory:
         # The per-step curve is one reserved key (single line panel), not T h-scalars.
         assert not any(k.startswith("val_traj_mse_h") for k in keys)
 
+    def test_logs_train_and_val_traj_curves(self, backprop_model, synthetic_dataset, tmp_path):
+        """Both splits' compounding-error curves are logged — at the pre-finetune baseline
+        (``*_init``, the Phase-1 model) and at the end of the fine-tune — as length-T lists."""
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt)), synthetic_dataset, _toy_episodes(), 0,
+            log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        first, last = rows[0], rows[-1]
+        for k in ("val_traj_mse_curve_init", "train_traj_mse_curve_init"):
+            assert len(first[k]) == 2  # horizon=2 -> one entry per rollout step
+        for k in ("val_traj_mse_curve", "train_traj_mse_curve"):
+            assert len(last[k]) == 2
+            assert all(np.isfinite(v) for v in last[k])
+
     def test_val_transition_toggle_off(self, backprop_model, synthetic_dataset, tmp_path):
         ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
         rows: list[dict] = []
@@ -770,3 +786,78 @@ def test_trajectory_finetune_reduces_compounding_error(tmp_path):
     jax.effects_barrier()
     final = float(m2._per_member_traj_mse(m2._params, val_windows)[0].min())
     assert final < initial, f"trajectory MSE did not improve: {initial=} {final=}"
+
+
+def _assert_deterministic_inference_ok(model, num_elites=NUM_ELITES):
+    """Inference checks for a no-logvar model: predict_ensemble returns std=None."""
+    obs, action = jnp.zeros(OBS_DIM), jnp.zeros(ACT_DIM)
+    means, stds = model.predict_ensemble(obs, action)
+    assert means.shape == (num_elites, OBS_DIM + 1)
+    assert stds is None
+    assert jnp.all(jnp.isfinite(means))
+    next_obs, reward, done = model.step(obs, action, jax.random.key(7))
+    assert next_obs.shape == (OBS_DIM,) and reward.shape == () and done.shape == ()
+    assert jnp.all(jnp.isfinite(next_obs)) and jnp.isfinite(reward)
+
+
+class TestDisableLogvar:
+    def test_no_clamp_params_and_smaller_head(self, synthetic_dataset):
+        """Deterministic head drops the logvar half and the clamp Parameters."""
+        model = _train(_backprop_cfg(disable_logvar_predictions=True), synthetic_dataset, 0)
+        assert model.predicts_logvar is False
+        assert "max_logvar" not in model._params and "min_logvar" not in model._params
+        # Mean head only: backbone output width is obs_dim+1, not 2*(obs_dim+1).
+        means, _ = model.predict_ensemble(jnp.zeros(OBS_DIM), jnp.zeros(ACT_DIM))
+        assert means.shape == (NUM_ELITES, OBS_DIM + 1)
+
+    def test_backprop_trains_and_infers(self, synthetic_dataset):
+        model = _train(_backprop_cfg(disable_logvar_predictions=True), synthetic_dataset, 0)
+        _assert_deterministic_inference_ok(model)
+
+    def test_eggroll_trains_and_infers(self, synthetic_dataset):
+        model = _train(_eggroll_cfg(disable_logvar_predictions=True), synthetic_dataset, 0)
+        _assert_deterministic_inference_ok(model)
+
+    def test_step_is_member_resampling_only(self, synthetic_dataset):
+        """No aleatoric noise: with a single elite the member choice is fixed too, so
+        step is fully deterministic regardless of the rng (the noise term is dropped)."""
+        obs, action = jnp.ones(OBS_DIM), jnp.ones(ACT_DIM) * 0.5
+        single = _train(
+            _backprop_cfg(disable_logvar_predictions=True, num_elites=1), synthetic_dataset, 0
+        )
+        a, _, _ = single.step(obs, action, jax.random.key(1))
+        b, _, _ = single.step(obs, action, jax.random.key(99))
+        assert jnp.array_equal(a, b)  # deterministic given one elite (no aleatoric noise)
+
+    def test_conflict_with_use_mse_fitness(self):
+        with pytest.raises(ValueError, match="incompatible"):
+            EnsembleMLP(
+                OBS_DIM, ACT_DIM, DATASET_ID,
+                _traj_cfg(disable_logvar_predictions=True, use_mse_fitness=True),
+            )
+
+    def test_conflict_with_freeze_clamp(self):
+        with pytest.raises(ValueError, match="incompatible"):
+            EnsembleMLP(
+                OBS_DIM, ACT_DIM, DATASET_ID,
+                _traj_cfg(disable_logvar_predictions=True, freeze_logvar_clamp=True),
+            )
+
+    def test_checkpoint_roundtrip_preserves_flag(self, synthetic_dataset, tmp_path):
+        cfg = _backprop_cfg(disable_logvar_predictions=True)
+        model = _train(cfg, synthetic_dataset, 0)
+        path = _write_ckpt(model, cfg, tmp_path)
+        reloaded = EnsembleMLP.load_from_checkpoint(path)
+        assert reloaded.predicts_logvar is False
+        ma, sa = model.predict_ensemble(jnp.zeros(OBS_DIM), jnp.zeros(ACT_DIM))
+        mb, sb = reloaded.predict_ensemble(jnp.zeros(OBS_DIM), jnp.zeros(ACT_DIM))
+        assert jnp.allclose(ma, mb) and sa is None and sb is None
+
+    def test_trajectory_finetune_no_logvar(self, synthetic_dataset, tmp_path):
+        """A deterministic Phase-1 model fine-tunes at trajectory level (MSE forced)."""
+        cfg1 = _backprop_cfg(disable_logvar_predictions=True)
+        ckpt = _write_ckpt(_train(cfg1, synthetic_dataset, 0), cfg1, tmp_path)
+        ft = _traj_cfg(init_checkpoint=str(ckpt), disable_logvar_predictions=True)
+        model = _train_traj(ft, synthetic_dataset, _toy_episodes(), 1)
+        assert model.predicts_logvar is False
+        _assert_deterministic_inference_ok(model)

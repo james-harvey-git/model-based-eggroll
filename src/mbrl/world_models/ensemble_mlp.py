@@ -92,6 +92,7 @@ def _dynamics_init_kwargs(cfg: DictConfig, obs_dim: int, act_dim: int) -> dict:
         backbone=str(cfg.get("backbone", "mlp")),
         max_logvar_init=float(cfg.get("max_logvar_init", 0.5)),
         min_logvar_init=float(cfg.get("min_logvar_init", -10.0)),
+        predict_logvar=not bool(cfg.get("disable_logvar_predictions", False)),
     )
 
 
@@ -136,6 +137,19 @@ class EnsembleMLP(EnsembleDynamics):
             f"cfg.trainer must be 'backprop', 'eggroll' or 'eggroll_trajectory'; "
             f"got {self.trainer!r}"
         )
+
+        # Deterministic-dynamics mode: the head predicts only mean + reward, training
+        # reduces to MSE, and all uncertainty becomes epistemic (ensemble disagreement).
+        # Backs the inherited EnsembleDynamics.predicts_logvar property.
+        self._predicts_logvar = not bool(cfg.get("disable_logvar_predictions", False))
+        if not self.predicts_logvar and (
+            bool(cfg.get("use_mse_fitness", False))
+            or bool(cfg.get("freeze_logvar_clamp", False))
+        ):
+            raise ValueError(
+                "disable_logvar_predictions is incompatible with use_mse_fitness / "
+                "freeze_logvar_clamp: there is no log-variance head to weight or freeze."
+            )
 
         # Populated by train() / load_from_checkpoint().
         self._params = None  # stacked (num_ensemble, ...) DynamicsNet params
@@ -182,8 +196,12 @@ class EnsembleMLP(EnsembleDynamics):
 
     def _member_meanlogvar(
         self, params_m, obs: jnp.ndarray, action: jnp.ndarray
-    ) -> tuple[jax.Array, jax.Array]:
-        """Unperturbed forward of a single member (base Noiser, iterinfo=None)."""
+    ) -> tuple[jax.Array, jax.Array | None]:
+        """Unperturbed forward of a single member (base Noiser, iterinfo=None).
+
+        ``logvar`` is ``None`` when the model runs without a variance head
+        (``disable_logvar_predictions``).
+        """
         common = CommonParams(
             Noiser, {}, {}, self._frozen_params, params_m, self._es_tree_key, None
         )
@@ -200,26 +218,43 @@ class EnsembleMLP(EnsembleDynamics):
 
     def predict_ensemble(
         self, obs: jnp.ndarray, action: jnp.ndarray
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        """(ensemble_mean, ensemble_std) over elite members; each (num_elites, obs+1)."""
+    ) -> tuple[jnp.ndarray, jnp.ndarray | None]:
+        """(ensemble_mean, ensemble_std) over elite members; each (num_elites, obs+1).
+
+        ``ensemble_std`` is ``None`` for a deterministic model (no variance head); in
+        that case uncertainty is epistemic only — the spread *across* member means.
+        """
         assert self._params is not None, "Must train() / load before predict_ensemble()"
         elite_params = self._elite_params()
+        if not self.predicts_logvar:
+            means = jax.vmap(
+                lambda pm: self._member_meanlogvar(pm, obs, action)[0]
+            )(elite_params)
+            return means, None
         means, logvars = jax.vmap(
             lambda pm: self._member_meanlogvar(pm, obs, action)
         )(elite_params)
+        assert logvars is not None  # predicts_logvar True ⇒ variance head present
         return means, jnp.exp(0.5 * logvars)
 
     def step(
         self, obs: jnp.ndarray, action: jnp.ndarray, rng: jax.Array
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Sample (next_obs, reward, done) from a randomly-selected elite member."""
+        """Sample (next_obs, reward, done) from a randomly-selected elite member.
+
+        For a deterministic model the per-step member resampling is the only source of
+        stochasticity (PETS-style trajectory sampling); no aleatoric noise is added.
+        """
         assert self._elite_idxs is not None, "Must train() / load before step()"
         rng_elite, rng_noise = jax.random.split(rng)
         ensemble_mean, ensemble_std = self.predict_ensemble(obs, action)
         sample_idx = jax.random.randint(rng_elite, (), 0, self.num_elites)
         mean = ensemble_mean[sample_idx]
-        std = ensemble_std[sample_idx]
-        sample = mean + jax.random.normal(rng_noise, shape=mean.shape) * std
+        if ensemble_std is None:
+            sample = mean
+        else:
+            std = ensemble_std[sample_idx]
+            sample = mean + jax.random.normal(rng_noise, shape=mean.shape) * std
         delta_obs, reward = sample[:-1], sample[-1]
         next_obs = obs + delta_obs
         done = self.termination_fn(obs, action, next_obs)
@@ -387,6 +422,9 @@ class EnsembleMLP(EnsembleDynamics):
                 )(obs_b, action_b)
 
             means, logvars, maxlv, minlv = jax.vmap(per_member)(params)  # (N,B,D),(N,D)
+            if not self.predicts_logvar:  # deterministic: plain MSE, no variance/clamp terms
+                return ((means - target_b[None]) ** 2).sum(0).mean()
+            assert logvars is not None and maxlv is not None and minlv is not None
             mse_loss = (((means - target_b[None]) ** 2) * jnp.exp(-logvars)).sum(0).mean()
             var_loss = logvars.sum(0).mean()
             logvar_diff = (maxlv - minlv).sum()
@@ -533,11 +571,15 @@ class EnsembleMLP(EnsembleDynamics):
                 ),
                 in_axes=(0, 0, 0),
             )(iterinfos, obs_b, action_b)
-            losses = (
-                jnp.mean(((tgt_b - means) ** 2) * jnp.exp(-logvars), axis=-1)
-                + jnp.mean(logvars, axis=-1)
-                + coef * jnp.sum(maxlv - minlv, axis=-1)
-            )
+            if not self.predicts_logvar:  # deterministic: plain MSE fitness
+                losses = jnp.mean((tgt_b - means) ** 2, axis=-1)
+            else:
+                assert logvars is not None and maxlv is not None and minlv is not None
+                losses = (
+                    jnp.mean(((tgt_b - means) ** 2) * jnp.exp(-logvars), axis=-1)
+                    + jnp.mean(logvars, axis=-1)
+                    + coef * jnp.sum(maxlv - minlv, axis=-1)
+                )
             normalized = EggRoll.convert_fitnesses(fnp, nps, -losses)
             new_nps, new_params = EggRoll.do_updates(
                 fnp, dict(nps), params_m, es_key_m, normalized, iterinfos, es_map
@@ -650,11 +692,14 @@ class EnsembleMLP(EnsembleDynamics):
         full_validation_interval = int(cfg.get("full_validation_interval", log_interval))
         assert log_interval > 0 and full_validation_interval > 0
         coef = float(cfg.get("logvar_diff_coef", 0.01))
-        freeze_clamp = bool(cfg.get("freeze_logvar_clamp", False))
+        # A deterministic model has no logvar head/clamp, so freezing is moot and the
+        # fitness is necessarily pure MSE (the __init__ conflict check forbids the flags).
+        freeze_clamp = bool(cfg.get("freeze_logvar_clamp", False)) and self.predicts_logvar
         # Diagnostic: drive the fitness by pure trajectory MSE (mean head only), dropping the
         # NLL precision weighting and the logvar terms. The variance head then receives no
         # fitness signal and drifts on noise, so this is for analysis, not production fine-tuning.
-        use_mse = bool(cfg.get("use_mse_fitness", False))
+        # Forced on (no choice) when the model has no log-variance head.
+        use_mse = bool(cfg.get("use_mse_fitness", False)) or not self.predicts_logvar
         log_transition = bool(cfg.get("val_transition_mse", True))
         log_disagreement = bool(cfg.get("log_ensemble_disagreement", False))
         n_ens = self.num_ensemble
@@ -757,6 +802,7 @@ class EnsembleMLP(EnsembleDynamics):
                         if use_mse:  # diagnostic: mean head only, no precision weighting
                             loss_t = jnp.mean((mean - tgt) ** 2)
                         else:
+                            assert logvar is not None  # use_mse False ⇒ logvar head present
                             loss_t = jnp.mean((mean - tgt) ** 2 * jnp.exp(-logvar)) + jnp.mean(
                                 logvar
                             )
@@ -771,6 +817,7 @@ class EnsembleMLP(EnsembleDynamics):
                     loss = jnp.sum(nlls)
                     # No clamp regulariser under MSE fitness: the variance head is out of the loss.
                     if not freeze_clamp and not use_mse:  # clamp regulariser added once per rollout
+                        assert maxlv is not None and minlv is not None
                         loss = loss + coef * jnp.sum(maxlv[0] - minlv[0])
                     return loss
 
@@ -799,16 +846,23 @@ class EnsembleMLP(EnsembleDynamics):
             stages = [(int(cfg.horizon), int(cfg.num_epochs))]
         final_horizon = stages[-1][0]
 
-        # Baseline log (gen 0): before-finetune trajectory/transition MSE + disagreement.
+        # Baseline log (gen 0): before-finetune trajectory/transition MSE + disagreement,
+        # plus the train/val compounding-error curves of the warm-start (Phase-1) model.
         if log_fn is not None:
             init_windows = tile_episodes_to_windows(val_eps, stages[0][0])
-            tj_pm, _ = self._per_member_traj_mse(stacked_params, init_windows)
+            tj_pm, init_val_curve = self._per_member_traj_mse(stacked_params, init_windows)
+            init_train_windows = _sample_train_curve_windows(
+                train_eps, stages[0][0], int(init_windows.start_obs.shape[0]), split_seed
+            )
+            _, init_train_curve = self._per_member_traj_mse(stacked_params, init_train_windows)
             metrics = dict(
                 val_traj_mse=float(tj_pm.mean()),
                 val_traj_mse_elite=float(jnp.sort(tj_pm)[:num_elites].mean()),
                 lr=float(jnp.asarray(lr_schedule(0)) if callable(lr_schedule) else lr_schedule),
                 sigma=float(jnp.asarray(sigma_schedule(0))),
                 transitions_seen=0, forward_evals=0,
+                val_traj_mse_curve_init=_mean_curve_list(init_val_curve),
+                train_traj_mse_curve_init=_mean_curve_list(init_train_curve),
             )
             if log_transition:
                 tr_pm = self._per_member_val_mse(stacked_params, tv_obs, tv_action, tv_targets)
@@ -871,15 +925,17 @@ class EnsembleMLP(EnsembleDynamics):
         self._trajectory_validation_split = float(traj_val_split)
         self._seed = int(split_seed)
 
-        # Final per-step MSE-vs-step curve (headline) + end-of-run disagreement.
+        # Final per-step MSE-vs-step curves (headline, train + val) + end-of-run disagreement.
         if log_fn is not None:
-            curve_mean = curve.mean(axis=0)  # (T,) all-member mean per horizon step
-            # The per-step compounding-error curve goes to a single line panel (see
+            final_train_windows = _sample_train_curve_windows(
+                train_eps, final_horizon, int(final_val_windows.start_obs.shape[0]), split_seed
+            )
+            _, train_curve = self._per_member_traj_mse(params, final_train_windows)
+            # Each per-step compounding-error curve goes to a single line panel (see
             # Logger.log_world_model_finetune_curve), not T separate scalar metrics.
             metrics: dict = {
-                "val_traj_mse_curve": [
-                    float(curve_mean[t]) for t in range(int(curve_mean.shape[0]))
-                ]
+                "val_traj_mse_curve": _mean_curve_list(curve),
+                "train_traj_mse_curve": _mean_curve_list(train_curve),
             }
             if log_disagreement:
                 metrics["ensemble_disagreement"] = float(
@@ -889,6 +945,29 @@ class EnsembleMLP(EnsembleDynamics):
 
 
 # ── module-level helpers (kept out of the class to keep closures explicit) ──────
+
+
+def _mean_curve_list(curve) -> list[float]:
+    """All-member mean of a (num_ensemble, T) per-step MSE curve, as a plain list."""
+    mean = curve.mean(axis=0)
+    return [float(mean[t]) for t in range(int(mean.shape[0]))]
+
+
+def _sample_train_curve_windows(
+    train_eps, horizon: int, n_val_windows: int, seed: int
+) -> TrajectoryWindows:
+    """Train-episode windows for the train compounding-error curve, subsampled (without
+    replacement) to the val-window count so the train curve matches the val curve's eval
+    cost and estimation noise. The sample depends only on (seed, horizon), not the
+    training RNG stream, so enabling/disabling logging cannot change the evolved params.
+    """
+    windows = tile_episodes_to_windows(train_eps, horizon)
+    n_windows = int(windows.start_obs.shape[0])
+    if n_windows <= n_val_windows:
+        return windows
+    key = jax.random.fold_in(jax.random.key(seed), horizon)
+    idxs = jax.random.choice(key, n_windows, (n_val_windows,), replace=False)
+    return jax.tree.map(lambda x: x[idxs], windows)
 
 
 def _container(maybe_cfg):
@@ -1047,7 +1126,7 @@ def _emit_traj_log(
         log_fn(s + step_offset, **metrics)
 
     def _with_val(_):
-        tj_pm, _curve = per_member_traj_mse(params, val_windows)
+        tj_pm, _ = per_member_traj_mse(params, val_windows)
         tj, tj_e = tj_pm.mean(), jnp.sort(tj_pm)[:num_elites].mean()
         if log_transition:
             tr_pm = per_member_val_mse(params, tv_obs, tv_action, tv_targets)
