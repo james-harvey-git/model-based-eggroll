@@ -8,11 +8,11 @@ activation: pqn
 init_scheme: eggroll
 backbone: mlp                     # mlp | residual_mlp
 
-num_epochs: 1000
+num_epochs: 400
 batch_size: 256
 lr: 1e-3
 optimizer: adamw                  # sgd | adam | adamw
-optimizer_kwargs: {eps: 1e-5, weight_decay: 1e-5}  # solver-specific (e.g. {momentum: 0.9} for sgd)
+optimizer_kwargs: {eps: 1e-5, weight_decay: 2.5e-5}  # solver-specific (e.g. {momentum: 0.9} for sgd)
 validation_split: 0.2
 logvar_diff_coef: 0.01
 max_logvar_init: 0.5
@@ -26,6 +26,11 @@ full_validation_interval: 500
 init_checkpoint: null             # path to an EnsembleMLP checkpoint to fine-tune from
 reset_optax_state: true          # carry the optimiser state across fine-tuning unless true
 seed: null                        # set from top-level cfg.seed by experiments/world_model.py
+
+# When true, run Phase-2 trajectory EGGROLL fine-tuning after this backprop pretrain,
+# in one invocation, reusing the separate `finetune_world_model` (eggroll_trajectory)
+# config and auto-handing off this run's checkpoint. See experiments/world_model.py.
+finetune: false
 
 # Precompute MoReL halt-penalty stats (discrepancy, min_r) into the checkpoint.
 # Expensive O(N^2) one-off; enable only when this world model feeds MoReL.
