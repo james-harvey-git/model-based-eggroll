@@ -846,16 +846,23 @@ class EnsembleMLP(EnsembleDynamics):
             stages = [(int(cfg.horizon), int(cfg.num_epochs))]
         final_horizon = stages[-1][0]
 
-        # Baseline log (gen 0): before-finetune trajectory/transition MSE + disagreement.
+        # Baseline log (gen 0): before-finetune trajectory/transition MSE + disagreement,
+        # plus the train/val compounding-error curves of the warm-start (Phase-1) model.
         if log_fn is not None:
             init_windows = tile_episodes_to_windows(val_eps, stages[0][0])
-            tj_pm, _ = self._per_member_traj_mse(stacked_params, init_windows)
+            tj_pm, init_val_curve = self._per_member_traj_mse(stacked_params, init_windows)
+            init_train_windows = _sample_train_curve_windows(
+                train_eps, stages[0][0], int(init_windows.start_obs.shape[0]), split_seed
+            )
+            _, init_train_curve = self._per_member_traj_mse(stacked_params, init_train_windows)
             metrics = dict(
                 val_traj_mse=float(tj_pm.mean()),
                 val_traj_mse_elite=float(jnp.sort(tj_pm)[:num_elites].mean()),
                 lr=float(jnp.asarray(lr_schedule(0)) if callable(lr_schedule) else lr_schedule),
                 sigma=float(jnp.asarray(sigma_schedule(0))),
                 transitions_seen=0, forward_evals=0,
+                val_traj_mse_curve_init=_mean_curve_list(init_val_curve),
+                train_traj_mse_curve_init=_mean_curve_list(init_train_curve),
             )
             if log_transition:
                 tr_pm = self._per_member_val_mse(stacked_params, tv_obs, tv_action, tv_targets)
@@ -918,15 +925,17 @@ class EnsembleMLP(EnsembleDynamics):
         self._trajectory_validation_split = float(traj_val_split)
         self._seed = int(split_seed)
 
-        # Final per-step MSE-vs-step curve (headline) + end-of-run disagreement.
+        # Final per-step MSE-vs-step curves (headline, train + val) + end-of-run disagreement.
         if log_fn is not None:
-            curve_mean = curve.mean(axis=0)  # (T,) all-member mean per horizon step
-            # The per-step compounding-error curve goes to a single line panel (see
+            final_train_windows = _sample_train_curve_windows(
+                train_eps, final_horizon, int(final_val_windows.start_obs.shape[0]), split_seed
+            )
+            _, train_curve = self._per_member_traj_mse(params, final_train_windows)
+            # Each per-step compounding-error curve goes to a single line panel (see
             # Logger.log_world_model_finetune_curve), not T separate scalar metrics.
             metrics: dict = {
-                "val_traj_mse_curve": [
-                    float(curve_mean[t]) for t in range(int(curve_mean.shape[0]))
-                ]
+                "val_traj_mse_curve": _mean_curve_list(curve),
+                "train_traj_mse_curve": _mean_curve_list(train_curve),
             }
             if log_disagreement:
                 metrics["ensemble_disagreement"] = float(
@@ -936,6 +945,29 @@ class EnsembleMLP(EnsembleDynamics):
 
 
 # ── module-level helpers (kept out of the class to keep closures explicit) ──────
+
+
+def _mean_curve_list(curve) -> list[float]:
+    """All-member mean of a (num_ensemble, T) per-step MSE curve, as a plain list."""
+    mean = curve.mean(axis=0)
+    return [float(mean[t]) for t in range(int(mean.shape[0]))]
+
+
+def _sample_train_curve_windows(
+    train_eps, horizon: int, n_val_windows: int, seed: int
+) -> TrajectoryWindows:
+    """Train-episode windows for the train compounding-error curve, subsampled (without
+    replacement) to the val-window count so the train curve matches the val curve's eval
+    cost and estimation noise. The sample depends only on (seed, horizon), not the
+    training RNG stream, so enabling/disabling logging cannot change the evolved params.
+    """
+    windows = tile_episodes_to_windows(train_eps, horizon)
+    n_windows = int(windows.start_obs.shape[0])
+    if n_windows <= n_val_windows:
+        return windows
+    key = jax.random.fold_in(jax.random.key(seed), horizon)
+    idxs = jax.random.choice(key, n_windows, (n_val_windows,), replace=False)
+    return jax.tree.map(lambda x: x[idxs], windows)
 
 
 def _container(maybe_cfg):
@@ -1094,7 +1126,7 @@ def _emit_traj_log(
         log_fn(s + step_offset, **metrics)
 
     def _with_val(_):
-        tj_pm, _curve = per_member_traj_mse(params, val_windows)
+        tj_pm, _ = per_member_traj_mse(params, val_windows)
         tj, tj_e = tj_pm.mean(), jnp.sort(tj_pm)[:num_elites].mean()
         if log_transition:
             tr_pm = per_member_val_mse(params, tv_obs, tv_action, tv_targets)

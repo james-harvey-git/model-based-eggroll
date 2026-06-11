@@ -552,6 +552,22 @@ class TestEnsembleMLPTrajectory:
         # The per-step curve is one reserved key (single line panel), not T h-scalars.
         assert not any(k.startswith("val_traj_mse_h") for k in keys)
 
+    def test_logs_train_and_val_traj_curves(self, backprop_model, synthetic_dataset, tmp_path):
+        """Both splits' compounding-error curves are logged — at the pre-finetune baseline
+        (``*_init``, the Phase-1 model) and at the end of the fine-tune — as length-T lists."""
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt)), synthetic_dataset, _toy_episodes(), 0,
+            log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        first, last = rows[0], rows[-1]
+        for k in ("val_traj_mse_curve_init", "train_traj_mse_curve_init"):
+            assert len(first[k]) == 2  # horizon=2 -> one entry per rollout step
+        for k in ("val_traj_mse_curve", "train_traj_mse_curve"):
+            assert len(last[k]) == 2
+            assert all(np.isfinite(v) for v in last[k])
+
     def test_val_transition_toggle_off(self, backprop_model, synthetic_dataset, tmp_path):
         ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
         rows: list[dict] = []
