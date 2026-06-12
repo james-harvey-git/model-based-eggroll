@@ -10,6 +10,11 @@ backbone: mlp                      # mlp | residual_mlp
 
 num_epochs: 1250000
 validation_split: 0.2
+# Chunk size for full-set evaluations (val MSE, rollout curves): bounds peak memory.
+eval_chunk_size: 16384
+# false drops the optimiser state from the checkpoint (halves size; only fine-tunes
+# with reset_optax_state=false need it).
+save_opt_state: false
 logvar_diff_coef: 0.01
 max_logvar_init: 0.5
 min_logvar_init: -10.0

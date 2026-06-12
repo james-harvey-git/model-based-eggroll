@@ -25,3 +25,8 @@ wandb:
 eval:
   num_episodes: 10
   eval_workers: 8
+
+wm_eval:
+  # stage=wm_eval: also report open-loop rollout MSE (+ per-step curve) at this horizon.
+  # 0 disables; only world-model classes with compute_traj_mse (EnsembleMLP) support it.
+  traj_horizon: 5

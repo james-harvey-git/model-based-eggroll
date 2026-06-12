@@ -135,6 +135,25 @@ class TestWorldModelRun:
         assert "wm_group" in ckpt
         assert isinstance(ckpt["wm_group"], str)
 
+    def test_checkpoint_leaves_are_numpy(self, trained_checkpoint):
+        """Checkpoints pickle numpy leaves, not live jax.Arrays (portable across
+        machines/JAX versions and never tied to a device buffer)."""
+        with open(trained_checkpoint, "rb") as f:
+            ckpt = pickle.load(f)
+        arrays = [x for x in jax.tree.leaves(ckpt) if hasattr(x, "shape")]
+        assert arrays
+        assert all(not isinstance(x, jax.Array) for x in arrays)
+
+    def test_save_opt_state_false_drops_opt_state(self, run_cfg, synthetic_dataset, tmp_path):
+        dataset, info = synthetic_dataset
+        run_cfg.world_model.save_opt_state = False
+        logger = Logger(run_cfg)
+        with patch("mbrl.experiments.world_model.load_dataset", return_value=(dataset, info)):
+            world_model_exp.run(run_cfg, logger)
+        with open(tmp_path / "world_model.pkl", "rb") as f:
+            ckpt = pickle.load(f)
+        assert ckpt["opt_state"] is None
+
     def test_log_fn_called_each_epoch(self, run_cfg, synthetic_dataset):
         dataset, info = synthetic_dataset
         log_calls: list[dict] = []

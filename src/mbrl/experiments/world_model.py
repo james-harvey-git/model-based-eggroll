@@ -60,6 +60,7 @@ def _make_onestep_log_fn(logger: Logger, start_time: float):
         val_mse_elite: float | None = None,
         lr: float | None = None,
         sigma: float | None = None,
+        fitness_std: float | None = None,
     ) -> None:
         metrics: dict[str, float] = {}
         train_loss_f = float(train_loss)
@@ -74,6 +75,8 @@ def _make_onestep_log_fn(logger: Logger, start_time: float):
             metrics["lr"] = float(lr)
         if sigma is not None and math.isfinite(sigma):
             metrics["sigma"] = float(sigma)
+        if fitness_std is not None and math.isfinite(fitness_std):
+            metrics["fitness_std"] = float(fitness_std)
         if epoch is not None:
             metrics["epoch"] = float(epoch)
         metrics["transitions_seen"] = float(transitions_seen)
@@ -87,14 +90,19 @@ def _make_onestep_log_fn(logger: Logger, start_time: float):
 def _make_traj_log_fn(logger: Logger, start_time: float):
     """(generation, **metrics) log fn for Phase-2 (its own ``world_model_ft`` axis).
 
-    Reserved keys containing ``_curve`` (per-rollout-step lists) are each routed to their
-    own line-chart panel rather than logged as scalars: ``{train,val}_traj_mse_curve``
-    (end of fine-tune) and ``{train,val}_traj_mse_curve_init`` (pre-finetune baseline).
+    Reserved keys containing ``_curve`` are routed to line-chart panels rather than
+    logged as scalars: a dict value (series name -> per-step list, e.g.
+    ``{train,val}_traj_mse_curve`` each overlaying init vs final) becomes one
+    line_series panel; a plain list becomes a single-line panel.
     """
 
     def log_fn(generation: int, **metrics) -> None:
         for key in [k for k in metrics if "_curve" in k]:
-            logger.log_world_model_finetune_curve(key, metrics.pop(key))
+            value = metrics.pop(key)
+            if isinstance(value, dict):
+                logger.log_world_model_finetune_curves(key, value)
+            else:
+                logger.log_world_model_finetune_curve(key, value)
         metrics["wall_time_sec"] = time.perf_counter() - start_time
         logger.log_world_model_finetune_step(int(generation), **metrics)
 
@@ -114,6 +122,15 @@ def _save_checkpoint(
         "finetune_lineage": lineage,
     }
     checkpoint = {**common, **world_model.checkpoint_state()}
+    if not bool(wm_cfg.get("save_opt_state", True)):
+        # Roughly halves checkpoint size; only fine-tunes with reset_optax_state=false
+        # need the optimiser state.
+        checkpoint["opt_state"] = None
+    # Pickle numpy leaves, not live jax.Arrays: portable across machines and JAX
+    # versions, and never tied to a device buffer.
+    checkpoint = jax.tree.map(
+        lambda x: jax.device_get(x) if isinstance(x, jax.Array) else x, checkpoint
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         pickle.dump(checkpoint, f)
