@@ -14,7 +14,7 @@ max_logvar_init: 0.5
 min_logvar_init: -10.0
 # Must match the Phase-1 checkpoint (the head shape differs). Drops the log-variance head
 # (deterministic dynamics): training/fitness become pure MSE; uncertainty is epistemic only.
-disable_logvar_predictions: false
+disable_logvar_predictions: true
 
 # Phase-1 checkpoint to fine-tune. Auto-set from the Phase-1 output in a combined
 # pipeline; set explicitly for a standalone Phase-2 run.

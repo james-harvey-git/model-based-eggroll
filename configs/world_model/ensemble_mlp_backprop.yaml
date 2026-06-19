@@ -28,7 +28,7 @@ min_logvar_init: -10.0
 # Deterministic dynamics (e.g. MuJoCo): drop the log-variance head so the model predicts
 # only mean + reward. Training becomes pure MSE; uncertainty is epistemic (ensemble
 # disagreement) only. MOPO must then use an epistemic penalty (penalty_type=auto/epistemic).
-disable_logvar_predictions: false
+disable_logvar_predictions: true
 
 # Logging cadence is measured in optimiser update steps (minibatches), not epochs,
 # so val loss can be tracked sub-epoch against transitions seen.
