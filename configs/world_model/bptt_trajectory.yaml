@@ -1,0 +1,61 @@
+_target_: mbrl.world_models.ensemble_mlp.EnsembleMLP
+trainer: bptt_trajectory
+
+# Architecture must match the Phase-1 checkpoint being fine-tuned. In a combined
+# pipeline (world_model.finetune=true) experiments/world_model.py overrides these to
+# the Phase-1 values; they matter on their own only for a standalone Phase-2 run.
+num_ensemble: 7
+num_elites: 5
+hidden_dims: [200, 200, 200, 200]
+activation: pqn
+init_scheme: eggroll
+backbone: mlp                      # mlp | residual_mlp
+max_logvar_init: 0.5
+min_logvar_init: -10.0
+# true -> pure-MSE rollout objective (project default); false -> full Gaussian-NLL
+# objective (precision-weighted MSE + logvar term + clamp regulariser). Must match the
+# Phase-1 checkpoint (the head shape differs).
+disable_logvar_predictions: true
+
+# Phase-1 checkpoint to fine-tune. Auto-set from the Phase-1 output in a combined
+# pipeline; set explicitly for a standalone Phase-2 run.
+init_checkpoint: null
+reset_optax_state: true           # fresh optimiser for the new (trajectory) objective
+
+num_epochs: 100                   # epochs over the trajectory-window set (placeholder; tune)
+horizon: 5                        # rollout length T; ignored if `curriculum` is set
+# Optional in-process horizon curriculum (re-tiles + carries params across stages):
+#   curriculum: [{horizon: 3, num_epochs: 30}, {horizon: 6, num_epochs: 70}]
+curriculum: null
+batch_size: 256                   # trajectory windows per minibatch
+keep_best: true                   # per-member best-by-trajectory-val-MSE snapshot per epoch
+
+# Steelman BPTT toolkit
+optimizer: adamw                  # sgd | adam | adamw
+lr: 1.0e-4                        # 10x below Phase-1's 1e-3: the multi-step unroll yields stiffer grads
+optimizer_kwargs: {eps: 1.0e-5, weight_decay: 2.5e-5}  # carried over from the Phase-1 backprop config
+max_grad_norm: 1.0                # global grad-norm clip (<=0 disables); the first-line stability defence
+remat_scan: true                  # jax.checkpoint the per-window rollout (memory ~O(1) in horizon)
+truncation: 0                     # 0 = full-horizon BPTT; k>0 = TBPTT-k (detach carry every k steps)
+
+# NLL-objective settings (used only when disable_logvar_predictions=false; ignored under MSE)
+logvar_diff_coef: 0.01            # lambda; clamp regulariser added once per rollout
+freeze_logvar_clamp: false        # ablation: hold max/min_logvar at Phase-1 values (no update)
+
+trajectory_validation_split: 0.2  # episode-level held-out fraction (matches eggroll_trajectory)
+val_transition_mse: true          # also log the comparable one-step val MSE (toggle off if slow)
+log_ensemble_disagreement: true   # cross-member std at start/end + every full validation
+# Chunk size for full-set evaluations (val MSE, rollout curves): bounds peak memory.
+eval_chunk_size: 16384
+# false drops the optimiser state from the checkpoint (halves size; only fine-tunes
+# with reset_optax_state=false need it).
+save_opt_state: false
+
+log_interval: 5                   # cadence in epochs
+full_validation_interval: 25      # cadence in epochs
+
+seed: null                        # set from top-level cfg.seed by experiments/world_model.py
+
+# MoReL halt-penalty stats (discrepancy, min_r). For a two-phase pipeline these are
+# computed only after Phase 2 (the trunk shifts during fine-tuning); MOPO needs none.
+precompute_term_stats: false

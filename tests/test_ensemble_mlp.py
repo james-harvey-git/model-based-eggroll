@@ -709,6 +709,238 @@ class TestEnsembleMLPTrajectory:
         assert not jnp.array_equal(min_pert, s.params["min_logvar"])
 
 
+# ── BPTT trajectory (Phase-2 BPTT baseline) trainer ─────────────────────────────
+
+
+def _bptt_traj_cfg(**overrides) -> DictConfig:
+    base = {
+        "trainer": "bptt_trajectory", "num_ensemble": NUM_ENSEMBLE, "num_elites": NUM_ELITES,
+        "hidden_dims": [8, 8], "activation": "relu", "init_scheme": "eggroll", "backbone": "mlp",
+        "max_logvar_init": 0.5, "min_logvar_init": -10.0,
+        "init_checkpoint": None, "reset_optax_state": True,
+        "num_epochs": 3, "horizon": 2, "curriculum": None, "batch_size": 2, "keep_best": True,
+        "optimizer": "adamw", "lr": 1e-3, "optimizer_kwargs": {"eps": 1e-5, "weight_decay": 1e-5},
+        "max_grad_norm": 1.0, "remat_scan": True, "truncation": 0,
+        "logvar_diff_coef": 0.01, "freeze_logvar_clamp": False,
+        "trajectory_validation_split": 0.34, "val_transition_mse": True,
+        "log_ensemble_disagreement": False,
+        "log_interval": 1, "full_validation_interval": 2, "seed": 0,
+    }
+    merged = OmegaConf.merge(OmegaConf.create(base), OmegaConf.create(overrides))
+    assert isinstance(merged, DictConfig)
+    return merged
+
+
+def _train_bptt_traj(cfg, dataset, episodes, key, log_fn=None):
+    model = EnsembleMLP(OBS_DIM, ACT_DIM, DATASET_ID, cfg)
+    model.train(dataset, cfg, jax.random.key(key), log_fn=log_fn, episodes=episodes)
+    jax.effects_barrier()
+    return model
+
+
+class TestEnsembleMLPBpttTrajectory:
+    def test_train_and_infer(self, backprop_model, synthetic_dataset, tmp_path):
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        model = _train_bptt_traj(
+            _bptt_traj_cfg(init_checkpoint=str(ckpt)), synthetic_dataset, _toy_episodes(), 1
+        )
+        assert model._params is not None
+        assert model._elite_idxs.shape == (NUM_ELITES,)
+        assert model._update_steps_completed > 0
+        _assert_inference_ok(model)
+
+    def test_requires_init_checkpoint(self, synthetic_dataset):
+        with pytest.raises(AssertionError, match="requires init_checkpoint"):
+            _train_bptt_traj(
+                _bptt_traj_cfg(init_checkpoint=None), synthetic_dataset, _toy_episodes(), 0
+            )
+
+    def test_determinism(self, backprop_model, synthetic_dataset, tmp_path):
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        cfg = _bptt_traj_cfg(init_checkpoint=str(ckpt))
+        eps = _toy_episodes()
+        a = _train_bptt_traj(cfg, synthetic_dataset, eps, 3)
+        b = _train_bptt_traj(cfg, synthetic_dataset, eps, 3)
+        c = _train_bptt_traj(cfg, synthetic_dataset, eps, 9)
+        # Same RNG key -> bit-identical params (warm-start + same data shuffle order).
+        assert all(
+            jnp.array_equal(x, y)
+            for x, y in zip(jax.tree.leaves(a._params), jax.tree.leaves(b._params))
+        )
+        # Different RNG key -> different shuffle order -> at least one leaf differs.
+        assert any(
+            not jnp.array_equal(x, y)
+            for x, y in zip(jax.tree.leaves(a._params), jax.tree.leaves(c._params))
+        )
+
+    def test_records_both_splits(self, backprop_model, synthetic_dataset, tmp_path):
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)  # split 0.2, seed 0
+        model = _train_bptt_traj(
+            _bptt_traj_cfg(init_checkpoint=str(ckpt), trajectory_validation_split=0.34),
+            synthetic_dataset, _toy_episodes(), 0,
+        )
+        state = model.checkpoint_state()
+        assert state["validation_split"] == 0.2  # carried from the Phase-1 checkpoint
+        assert state["trajectory_validation_split"] == 0.34  # episode split from cfg
+
+    def test_validation_is_mse_only(self, backprop_model, synthetic_dataset, tmp_path):
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_bptt_traj(
+            _bptt_traj_cfg(init_checkpoint=str(ckpt)), synthetic_dataset, _toy_episodes(), 0,
+            log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        keys = set().union(*(r.keys() for r in rows))
+        assert "val_traj_mse" in keys and "val_traj_mse_elite" in keys
+        assert "val_transition_mse" in keys and "val_transition_mse_elite" in keys
+        assert "train_loss" in keys  # training objective logged as train_loss
+        assert not any("nll" in k for k in keys)
+        assert {"val_traj_mse_h1", "val_traj_mse_hmid", "val_traj_mse_hlast"} <= keys
+        assert "train_traj_mse" in keys
+        # BPTT stability diagnostics replace the ES fitness_std/sigma.
+        assert "grad_norm" in keys and "clip_fraction" in keys
+        assert "sigma" not in keys and "fitness_std" not in keys
+
+    def test_logs_train_and_val_traj_curves(self, backprop_model, synthetic_dataset, tmp_path):
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_bptt_traj(
+            _bptt_traj_cfg(init_checkpoint=str(ckpt)), synthetic_dataset, _toy_episodes(), 0,
+            log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        first, last = rows[0], rows[-1]
+        for key in ("train_traj_mse_curve", "val_traj_mse_curve"):
+            assert set(first[key]) == {"init"}
+            assert set(last[key]) == {"init", "final"}
+            for series in (*first[key].values(), *last[key].values()):
+                assert len(series) == 2  # horizon=2 -> one entry per rollout step
+                assert all(np.isfinite(v) for v in series)
+        assert last["train_traj_mse_curve"]["init"] == first["train_traj_mse_curve"]["init"]
+
+    def test_val_transition_toggle_off(self, backprop_model, synthetic_dataset, tmp_path):
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_bptt_traj(
+            _bptt_traj_cfg(init_checkpoint=str(ckpt), val_transition_mse=False),
+            synthetic_dataset, _toy_episodes(), 0, log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        keys = set().union(*(r.keys() for r in rows))
+        assert "val_traj_mse" in keys
+        assert "val_transition_mse" not in keys
+
+    def test_curriculum_runs_and_counts(self, backprop_model, synthetic_dataset, tmp_path):
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        step_offset = backprop_model._update_steps_completed
+        cfg = _bptt_traj_cfg(
+            init_checkpoint=str(ckpt),
+            curriculum=[{"horizon": 2, "num_epochs": 2}, {"horizon": 3, "num_epochs": 3}],
+        )
+        model = _train_bptt_traj(cfg, synthetic_dataset, _toy_episodes(), 0)
+        _assert_inference_ok(model)
+        assert model._update_steps_completed == step_offset + 5
+
+    def test_freeze_logvar_clamp(self, backprop_model, synthetic_dataset, tmp_path):
+        """NLL ablation: freezing holds the clamp bounds bit-identical (overwrite-after-
+        update beats stop_gradient — adamw weight-decay would otherwise still move them)."""
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        ckpt_max = backprop_model._params["max_logvar"]
+        ckpt_min = backprop_model._params["min_logvar"]
+        frozen = _train_bptt_traj(
+            _bptt_traj_cfg(init_checkpoint=str(ckpt), freeze_logvar_clamp=True, num_epochs=5),
+            synthetic_dataset, _toy_episodes(), 0,
+        )
+        assert jnp.array_equal(frozen._params["max_logvar"], ckpt_max)
+        assert jnp.array_equal(frozen._params["min_logvar"], ckpt_min)
+        unfrozen = _train_bptt_traj(
+            _bptt_traj_cfg(init_checkpoint=str(ckpt), freeze_logvar_clamp=False, num_epochs=5),
+            synthetic_dataset, _toy_episodes(), 0,
+        )
+        assert not jnp.array_equal(unfrozen._params["max_logvar"], ckpt_max)
+
+    def test_truncation_changes_optimisation(self, backprop_model, synthetic_dataset, tmp_path):
+        """TBPTT-k detaches the carry, so it must evolve params differently from full BPTT
+        with the same seed/data — i.e. the truncation path actually changed the gradient."""
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        eps = _toy_episodes()
+        full = _train_bptt_traj(
+            _bptt_traj_cfg(init_checkpoint=str(ckpt), truncation=0, num_epochs=5),
+            synthetic_dataset, eps, 0,
+        )
+        trunc = _train_bptt_traj(
+            _bptt_traj_cfg(init_checkpoint=str(ckpt), truncation=1, num_epochs=5),
+            synthetic_dataset, eps, 0,
+        )
+        _assert_inference_ok(trunc)
+        assert any(
+            not jnp.array_equal(x, y)
+            for x, y in zip(jax.tree.leaves(full._params), jax.tree.leaves(trunc._params))
+        )
+
+    def test_grad_norm_clip_changes_optimisation(
+        self, backprop_model, synthetic_dataset, tmp_path
+    ):
+        """A tight global-norm clip must change the evolved params vs no clip (same seed)."""
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        eps = _toy_episodes()
+        noclip = _train_bptt_traj(
+            _bptt_traj_cfg(init_checkpoint=str(ckpt), max_grad_norm=0.0, num_epochs=5),
+            synthetic_dataset, eps, 0,
+        )
+        clipped = _train_bptt_traj(
+            _bptt_traj_cfg(init_checkpoint=str(ckpt), max_grad_norm=1e-4, num_epochs=5),
+            synthetic_dataset, eps, 0,
+        )
+        assert any(
+            not jnp.array_equal(x, y)
+            for x, y in zip(jax.tree.leaves(noclip._params), jax.tree.leaves(clipped._params))
+        )
+
+    def test_mse_objective_no_logvar(self, synthetic_dataset, tmp_path):
+        """disable_logvar_predictions=true -> pure-MSE rollout objective, std=None on infer.
+        Warm-starts from a matching no-logvar Phase-1 checkpoint."""
+        bp = _backprop_cfg(disable_logvar_predictions=True)
+        m1 = _train(bp, synthetic_dataset, 0)
+        ckpt = _write_ckpt(m1, bp, tmp_path)
+        model = _train_bptt_traj(
+            _bptt_traj_cfg(init_checkpoint=str(ckpt), disable_logvar_predictions=True),
+            synthetic_dataset, _toy_episodes(), 0,
+        )
+        means, stds = model.predict_ensemble(jnp.zeros(OBS_DIM), jnp.zeros(ACT_DIM))
+        assert means.shape == (NUM_ELITES, OBS_DIM + 1) and stds is None
+        assert model._update_steps_completed > 0
+
+    def test_finetune_true_runs_two_phases(self, synthetic_dataset, tmp_path):
+        """world_model.finetune=true with a bptt_trajectory Phase-2 config runs both phases,
+        auto-hands off the Phase-1 checkpoint, and forces Phase-2 arch to match Phase-1."""
+        info = DatasetInfo(
+            obs_mean=jnp.zeros(OBS_DIM), obs_std=jnp.ones(OBS_DIM),
+            obs_dim=OBS_DIM, act_dim=ACT_DIM, dataset_id=DATASET_ID,
+        )
+        target = "mbrl.world_models.ensemble_mlp.EnsembleMLP"
+        bp = _backprop_cfg()
+        OmegaConf.update(bp, "_target_", target, force_add=True)
+        bp.finetune = True
+        ft = _bptt_traj_cfg(num_ensemble=5, num_elites=4)  # deliberately mismatched
+        OmegaConf.update(ft, "_target_", target, force_add=True)
+        run_cfg = OmegaConf.create({
+            "seed": 0, "checkpoint_dir": str(tmp_path), "wandb": {"enabled": False},
+            "dataset": {"name": DATASET_ID}, "world_model": bp, "finetune_world_model": ft,
+        })
+        logger = Logger(run_cfg)
+        with (
+            patch("mbrl.experiments.world_model.load_dataset",
+                  return_value=(synthetic_dataset, info)),
+            patch("mbrl.experiments.world_model.load_episodes",
+                  return_value=(_toy_episodes(), info)),
+        ):
+            world_model_exp.run(run_cfg, logger)
+
+        assert (tmp_path / "world_model_phase1.pkl").exists()
+        final = load_world_model_from_checkpoint(str(tmp_path / "world_model.pkl"))
+        assert final.num_ensemble == NUM_ENSEMBLE  # forced from Phase-1, not the ft cfg's 5
+        _assert_inference_ok(final, num_elites=NUM_ELITES)
+
+
 class TestTrajectoryCombinedPipeline:
     def test_finetune_true_runs_two_phases(self, synthetic_dataset, tmp_path):
         """world_model.finetune=true runs backprop then trajectory in one invocation,
@@ -807,6 +1039,78 @@ def test_trajectory_finetune_reduces_compounding_error(tmp_path):
     })
     # Initial (Phase-1) trajectory MSE on the held-out episodes, via a model loaded
     # straight from the Phase-1 checkpoint (inference structure + params set on load).
+    from mbrl.data import derive_episode_train_val_split, tile_episodes_to_windows
+
+    _, val_eps = derive_episode_train_val_split(episodes, 0.25, 0)
+    val_windows = tile_episodes_to_windows(val_eps, 4)
+    m_init = EnsembleMLP.load_from_checkpoint(ckpt_path)
+    initial = float(m_init._per_member_traj_mse(m_init._params, val_windows)[0].min())
+
+    m2 = EnsembleMLP(obs_dim, act_dim, DATASET_ID, ft_cfg)
+    m2.train(flat, ft_cfg, jax.random.key(1), episodes=episodes)
+    jax.effects_barrier()
+    final = float(m2._per_member_traj_mse(m2._params, val_windows)[0].min())
+    assert final < initial, f"trajectory MSE did not improve: {initial=} {final=}"
+
+
+@pytest.mark.slow
+def test_bptt_trajectory_finetune_reduces_compounding_error(tmp_path):
+    """BPTT counterpart of the EGGROLL slow test: on the same over-fittable deterministic
+    toy, Phase-2 BPTT fine-tuning reduces the multi-step rollout MSE vs the Phase-1 model."""
+    obs_dim, act_dim, n_ep, length = 2, 1, 12, 4
+    rng = np.random.default_rng(0)
+    a_mat = np.array([[0.9, 0.1], [-0.1, 0.8]], np.float32)
+    b_mat = np.array([[0.2], [0.3]], np.float32)
+    obs = np.zeros((n_ep, length + 1, obs_dim), np.float32)
+    act = rng.standard_normal((n_ep, length, act_dim)).astype(np.float32)
+    rew = np.zeros((n_ep, length), np.float32)
+    obs[:, 0] = rng.standard_normal((n_ep, obs_dim))
+    for k in range(length):
+        delta = obs[:, k] @ a_mat.T * 0.1 + act[:, k] @ b_mat.T
+        obs[:, k + 1] = obs[:, k] + delta
+        rew[:, k] = obs[:, k + 1].sum(axis=1)
+    episodes = EpisodeBatch(
+        jnp.asarray(obs), jnp.asarray(act), jnp.asarray(rew),
+        jnp.ones((n_ep, length), jnp.float32), jnp.asarray([length] * n_ep, jnp.int32),
+    )
+    flat = Transition(
+        obs=jnp.asarray(obs[:, :-1].reshape(-1, obs_dim)),
+        action=jnp.asarray(act.reshape(-1, act_dim)),
+        reward=jnp.asarray(rew.reshape(-1)),
+        next_obs=jnp.asarray(obs[:, 1:].reshape(-1, obs_dim)),
+        done=jnp.zeros((n_ep * length,), jnp.float32),
+    )
+
+    arch = dict(
+        num_ensemble=2, num_elites=1, hidden_dims=[32, 32], activation="relu",
+        init_scheme="eggroll", backbone="mlp", max_logvar_init=0.5, min_logvar_init=-10.0,
+    )
+    bp_cfg = OmegaConf.create({
+        "trainer": "backprop", **arch, "num_epochs": 30, "batch_size": 16, "lr": 1e-3,
+        "optimizer": "adamw", "optimizer_kwargs": {"eps": 1e-5}, "validation_split": 0.2,
+        "logvar_diff_coef": 0.01, "log_interval": 50, "full_validation_interval": 50, "seed": 0,
+    })
+    m1 = EnsembleMLP(obs_dim, act_dim, DATASET_ID, bp_cfg)
+    m1.train(flat, bp_cfg, jax.random.key(0))
+    jax.effects_barrier()
+    ckpt = {
+        **m1.checkpoint_state(), "obs_dim": obs_dim, "act_dim": act_dim,
+        "dataset_id": DATASET_ID, "world_model_cfg": OmegaConf.to_container(bp_cfg),
+    }
+    ckpt_path = tmp_path / "phase1.pkl"
+    with open(ckpt_path, "wb") as f:
+        pickle.dump(ckpt, f)
+
+    ft_cfg = OmegaConf.create({
+        "trainer": "bptt_trajectory", **arch, "init_checkpoint": str(ckpt_path),
+        "reset_optax_state": True, "num_epochs": 400, "horizon": 4, "curriculum": None,
+        "batch_size": 8, "keep_best": True, "optimizer": "adamw", "lr": 1e-2,
+        "optimizer_kwargs": {"eps": 1e-5}, "max_grad_norm": 1.0, "remat_scan": True,
+        "truncation": 0, "logvar_diff_coef": 0.01, "freeze_logvar_clamp": False,
+        "trajectory_validation_split": 0.25, "val_transition_mse": False,
+        "log_ensemble_disagreement": False, "log_interval": 100,
+        "full_validation_interval": 100, "seed": 0,
+    })
     from mbrl.data import derive_episode_train_val_split, tile_episodes_to_windows
 
     _, val_eps = derive_episode_train_val_split(episodes, 0.25, 0)

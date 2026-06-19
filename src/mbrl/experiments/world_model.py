@@ -157,10 +157,10 @@ def run(cfg: DictConfig, logger: Logger) -> None:
 
     Three modes, dispatched from cfg.world_model:
     - **Combined two-phase** (``world_model.finetune=true``): backprop pretrain, then
-      trajectory EGGROLL fine-tune (the separate ``finetune_world_model`` config) with the
-      Phase-1 checkpoint auto-handed off.
-    - **Standalone Phase 2** (``trainer=eggroll_trajectory``): a single trajectory fine-tune
-      from an explicit ``init_checkpoint``.
+      trajectory fine-tune (the separate ``finetune_world_model`` config — EGGROLL or BPTT)
+      with the Phase-1 checkpoint auto-handed off.
+    - **Standalone Phase 2** (``trainer=eggroll_trajectory`` / ``bptt_trajectory``): a single
+      trajectory fine-tune from an explicit ``init_checkpoint``.
     - **Single-phase** (otherwise): one backprop or eggroll training run (unchanged).
     """
     rng = jax.random.key(cfg.seed)
@@ -207,7 +207,9 @@ def run(cfg: DictConfig, logger: Logger) -> None:
     # ── Single-phase (backprop, eggroll, or standalone eggroll_trajectory) ──────
     _plumb_seed(cfg.world_model, cfg.seed)
     _check_init_ckpt_dataset(cfg.world_model.get("init_checkpoint", None), info)
-    is_traj = str(cfg.world_model.get("trainer", "")) == "eggroll_trajectory"
+    is_traj = str(cfg.world_model.get("trainer", "")) in (
+        "eggroll_trajectory", "bptt_trajectory"
+    )
     rng, train_rng = jax.random.split(rng)
     if is_traj:
         episodes, _ = load_episodes(cfg.dataset.name)
