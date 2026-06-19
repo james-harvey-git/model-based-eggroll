@@ -135,6 +135,17 @@ class TestEnsembleMLPBackprop:
     def test_checkpoint_roundtrip(self, backprop_model, tmp_path):
         _roundtrip(backprop_model, _backprop_cfg(), tmp_path)
 
+    def test_keep_best_no_worse_than_last(self, synthetic_dataset):
+        """keep_best snapshots each member's best-by-holdout epoch, so per-member val MSE
+        can only match or beat the last-epoch params of the otherwise-identical run."""
+        best = _train(_backprop_cfg(keep_best=True), synthetic_dataset, 0)
+        last = _train(_backprop_cfg(keep_best=False), synthetic_dataset, 0)
+        _, val = derive_train_val_split(synthetic_dataset, 0.2, 0)
+        targets = ensemble_mlp_mod._targets(val)
+        mse_best = best._per_member_val_mse(best._params, val.obs, val.action, targets)
+        mse_last = last._per_member_val_mse(last._params, val.obs, val.action, targets)
+        assert jnp.all(mse_best <= mse_last + 1e-7)
+
     def test_logs_lr(self, synthetic_dataset):
         cfg = _backprop_cfg()
         lrs: list[float] = []
@@ -174,6 +185,18 @@ class TestEnsembleMLPEggroll:
         assert rows[-1]["ts"] == n_prompts * cfg.num_epochs
         # forward_evals (compute) DOES scale ~ num_ensemble.
         assert rows[-1]["fe"] >= cfg.num_epochs * cfg.eggroll.population_size * cfg.num_ensemble
+
+    def test_logs_fitness_std(self, synthetic_dataset):
+        """The within-generation per-perturbation loss std (ES signal-to-noise) is logged."""
+        stds: list[float] = []
+
+        def log_fn(step, train_loss, val_mse, transitions_seen, forward_evals, **kw):
+            if kw.get("fitness_std") is not None:
+                stds.append(float(kw["fitness_std"]))
+
+        _train(_eggroll_cfg(), synthetic_dataset, 1, log_fn=log_fn)
+        assert stds, "eggroll logging never emitted fitness_std"
+        assert all(np.isfinite(v) and v >= 0.0 for v in stds)
 
     def test_num_ensemble_one_single_net(self, synthetic_dataset):
         model = _train(_eggroll_cfg(num_ensemble=1, num_elites=1), synthetic_dataset, 2)
@@ -549,12 +572,18 @@ class TestEnsembleMLPTrajectory:
         # Training loss is logged as train_loss (Phase-1 naming); validation is MSE-only.
         assert "train_loss" in keys
         assert not any("nll" in k for k in keys)
-        # The per-step curve is one reserved key (single line panel), not T h-scalars.
-        assert not any(k.startswith("val_traj_mse_h") for k in keys)
+        # Fixed-depth scalars from the val curve (h=1 / mid / last — not one scalar per
+        # horizon step), the train-side trajectory MSE (overfitting-gap signal), and the
+        # within-generation fitness std (ES signal-to-noise diagnostic).
+        assert {"val_traj_mse_h1", "val_traj_mse_hmid", "val_traj_mse_hlast"} <= keys
+        assert "train_traj_mse" in keys
+        assert "fitness_std" in keys
 
     def test_logs_train_and_val_traj_curves(self, backprop_model, synthetic_dataset, tmp_path):
-        """Both splits' compounding-error curves are logged — at the pre-finetune baseline
-        (``*_init``, the Phase-1 model) and at the end of the fine-tune — as length-T lists."""
+        """One compounding-error panel per dataset (train, val), each overlaying init vs
+        final. The baseline row emits the same keys with the init series only (the
+        end-of-run log overwrites the panel), and the final row adds scalars for the
+        W&B summary. Each series is a length-T per-step list."""
         ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
         rows: list[dict] = []
         _train_traj(
@@ -562,11 +591,15 @@ class TestEnsembleMLPTrajectory:
             log_fn=lambda gen, **kw: rows.append(kw),
         )
         first, last = rows[0], rows[-1]
-        for k in ("val_traj_mse_curve_init", "train_traj_mse_curve_init"):
-            assert len(first[k]) == 2  # horizon=2 -> one entry per rollout step
-        for k in ("val_traj_mse_curve", "train_traj_mse_curve"):
-            assert len(last[k]) == 2
-            assert all(np.isfinite(v) for v in last[k])
+        for key in ("train_traj_mse_curve", "val_traj_mse_curve"):
+            assert set(first[key]) == {"init"}
+            assert set(last[key]) == {"init", "final"}
+            for series in (*first[key].values(), *last[key].values()):
+                assert len(series) == 2  # horizon=2 -> one entry per rollout step
+                assert all(np.isfinite(v) for v in series)
+        assert last["train_traj_mse_curve"]["init"] == first["train_traj_mse_curve"]["init"]
+        for k in ("val_traj_mse", "val_traj_mse_elite", "train_traj_mse"):
+            assert np.isfinite(last[k])
 
     def test_val_transition_toggle_off(self, backprop_model, synthetic_dataset, tmp_path):
         ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)

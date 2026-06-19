@@ -19,7 +19,7 @@ Inference is identical for both trainers — unperturbed member forwards (no pop
 from collections.abc import Callable
 from pathlib import Path
 import pickle
-from typing import cast
+from typing import NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -118,6 +118,54 @@ def _assert_params_loadable(new_params, ckpt_params) -> None:
         )
 
 
+class _Warmstart(NamedTuple):
+    """Resolved ``init_checkpoint`` plus the split parameters that must come from it."""
+
+    ckpt: dict | None
+    val_split: float
+    split_seed: int
+    step_offset: int
+
+
+def _load_warmstart(cfg: DictConfig, seed: int) -> _Warmstart:
+    """Load the optional ``init_checkpoint`` and resolve the train/val split parameters.
+
+    When warm-starting, the split fraction and seed come from the checkpoint so the
+    source run's exact val set is reproduced (keeps metrics comparable and prevents
+    val-set leakage into fine-tuning); from scratch they come from this run's cfg/seed.
+    """
+    path = cfg.get("init_checkpoint", None)
+    if path is None:
+        return _Warmstart(None, float(cfg.validation_split), int(seed), 0)
+    with open(path, "rb") as f:
+        ckpt = pickle.load(f)
+    return _Warmstart(
+        ckpt,
+        float(ckpt["validation_split"]),
+        int(ckpt.get("seed", seed)),
+        int(ckpt.get("update_steps_completed", 0)),
+    )
+
+
+def _resume_params(fresh_params, ckpt: dict | None):
+    """Freshly-initialised params, or the checkpoint's after a structure/shape guard."""
+    if ckpt is None:
+        return fresh_params
+    _assert_params_loadable(fresh_params, ckpt["params"])
+    return ckpt["params"]
+
+
+def _resume_opt_state(fresh_opt_state, ckpt: dict | None, reset_optax: bool):
+    """Fresh optimiser state, or the checkpoint's when resuming (structure-guarded)."""
+    if ckpt is None or reset_optax or ckpt.get("opt_state") is None:
+        return fresh_opt_state
+    assert jax.tree.structure(fresh_opt_state) == jax.tree.structure(ckpt["opt_state"]), (
+        "init_checkpoint opt_state structure mismatch (different solver?). "
+        "Set reset_optax_state=true to start a fresh optimiser."
+    )
+    return ckpt["opt_state"]
+
+
 class EnsembleMLP(EnsembleDynamics):
     """Ensemble of `DynamicsNet` members trained by backprop or EGGROLL."""
 
@@ -150,6 +198,10 @@ class EnsembleMLP(EnsembleDynamics):
                 "disable_logvar_predictions is incompatible with use_mse_fitness / "
                 "freeze_logvar_clamp: there is no log-variance head to weight or freeze."
             )
+
+        # Chunk size for full-set evaluations (val MSE, disagreement, rollout curves):
+        # bounds peak activation memory independently of dataset size.
+        self._eval_chunk_size = int(cfg.get("eval_chunk_size", 16384))
 
         # Populated by train() / load_from_checkpoint().
         self._params = None  # stacked (num_ensemble, ...) DynamicsNet params
@@ -260,14 +312,31 @@ class EnsembleMLP(EnsembleDynamics):
         done = self.termination_fn(obs, action, next_obs)
         return next_obs, reward, done
 
+    def _ensemble_means(self, params, obs, action) -> jax.Array:
+        """(num_members, N, D) unperturbed member mean predictions over a transition set.
+
+        Computed in fixed-size chunks over the transition axis (``lax.map`` batch_size)
+        so peak activation memory is bounded by ``eval_chunk_size``, not dataset size.
+        """
+        means = jax.lax.map(
+            lambda oa: jax.vmap(
+                lambda pm: self._member_meanlogvar(pm, oa[0], oa[1])[0]
+            )(params),
+            (obs, action),
+            batch_size=self._eval_chunk_size,
+        )  # (N, E, D)
+        return jnp.swapaxes(means, 0, 1)
+
     def _per_member_val_mse(self, params, val_obs, val_action, val_targets) -> jax.Array:
         """(num_ensemble,) unperturbed mean MSE per member over the val set."""
-        means, _ = jax.vmap(  # over members
-            lambda pm: jax.vmap(  # over val transitions
-                lambda o, a: self._member_meanlogvar(pm, o, a), in_axes=(0, 0)
-            )(val_obs, val_action)
-        )(params)
+        means = self._ensemble_means(params, val_obs, val_action)
         return ((means - val_targets[None]) ** 2).mean(axis=(1, 2))
+
+    def _val_mse_and_disagreement(self, params, obs, action, targets):
+        """Per-member val MSE (E,) + mean cross-member std, from a single means pass."""
+        means = self._ensemble_means(params, obs, action)
+        per_member = ((means - targets[None]) ** 2).mean(axis=(1, 2))
+        return per_member, jnp.mean(jnp.std(means, axis=0))
 
     def compute_val_mse(self, dataset: Transition) -> jax.Array:
         """Elite-mean MSE over *dataset* (matches the training-time ``val_mse_elite``)."""
@@ -368,16 +437,9 @@ class EnsembleMLP(EnsembleDynamics):
     # ---- backprop trainer ----
 
     def _train_backprop(self, dataset, cfg, rng, seed, log_fn) -> None:
-        ckpt = cfg.get("init_checkpoint", None)
         reset_optax = bool(cfg.get("reset_optax_state", False))
-        if ckpt is not None:
-            with open(ckpt, "rb") as f:
-                ckpt = pickle.load(f)
-            val_split = float(ckpt["validation_split"])
-            split_seed = int(ckpt["seed"])
-        else:
-            val_split = float(cfg.validation_split)
-            split_seed = seed
+        ws = _load_warmstart(cfg, seed)
+        ckpt, val_split, split_seed = ws.ckpt, ws.val_split, ws.split_seed
 
         train_data, val_data = derive_train_val_split(dataset, val_split, split_seed)
         train_obs, train_action = train_data.obs, train_data.action
@@ -389,16 +451,8 @@ class EnsembleMLP(EnsembleDynamics):
         self._set_inference_structure(single_params, frozen_params, scan_map)
 
         tx = _build_optimizer(cfg)
-        if ckpt is not None:
-            _assert_params_loadable(stacked_params, ckpt["params"])
-            stacked_params = ckpt["params"]
-        opt_state = tx.init(stacked_params)
-        if ckpt is not None and not reset_optax and ckpt.get("opt_state") is not None:
-            assert jax.tree.structure(opt_state) == jax.tree.structure(ckpt["opt_state"]), (
-                "init_checkpoint opt_state structure mismatch (different solver?). "
-                "Set reset_optax_state=true to start a fresh optimiser."
-            )
-            opt_state = ckpt["opt_state"]
+        stacked_params = _resume_params(stacked_params, ckpt)
+        opt_state = _resume_opt_state(tx.init(stacked_params), ckpt, reset_optax)
 
         batch_size = int(cfg.batch_size)
         coef = float(cfg.get("logvar_diff_coef", 0.01))
@@ -456,19 +510,38 @@ class EnsembleMLP(EnsembleDynamics):
             )
 
         rng, shuffle_rng = jax.random.split(rng)
+        keep_best = bool(cfg.get("keep_best", True))
 
         def train_epoch(epoch, carry):
-            params, opt_state, step = carry
+            params, opt_state, step, best_params, best_val = carry
             epoch_rng = jax.random.fold_in(shuffle_rng, epoch)
             it = create_epoch_iterator(
                 (train_obs, train_action, train_targets), batch_size, epoch_rng
             )
             (params, opt_state, step), _ = jax.lax.scan(_train_step, (params, opt_state, step), it)
-            return params, opt_state, step
+            if keep_best:
+                # Per-member best-by-holdout snapshot at each epoch boundary (the deep-
+                # ensembles / MBPO recipe): the returned model is each member's best epoch,
+                # not its last. Costs one val pass per epoch on top of any logging pass.
+                per_member = self._per_member_val_mse(params, val_obs, val_action, val_targets)
+                improved = per_member < best_val
+                best_val = jnp.where(improved, per_member, best_val)
+                best_params = jax.tree.map(
+                    lambda best, new: jnp.where(
+                        improved.reshape(improved.shape + (1,) * (new.ndim - 1)), new, best
+                    ),
+                    best_params, params,
+                )
+            return params, opt_state, step, best_params, best_val
 
-        params, opt_state, _ = jax.lax.fori_loop(
-            0, int(cfg.num_epochs), train_epoch, (stacked_params, opt_state, jnp.int32(0))
+        params, opt_state, _, best_params, _ = jax.lax.fori_loop(
+            0, int(cfg.num_epochs), train_epoch,
+            (stacked_params, opt_state, jnp.int32(0), stacked_params,
+             jnp.full((n_ens,), jnp.inf)),
         )
+        if keep_best:
+            # opt_state stays the final step's (a Phase-2 fine-tune resets it by default).
+            params = best_params
         self._finalise(
             params, opt_state, val_data, int(cfg.num_epochs) * batches_per_epoch,
             val_split, split_seed,
@@ -486,25 +559,21 @@ class EnsembleMLP(EnsembleDynamics):
         log_interval = int(cfg.log_interval)
         assert log_interval > 0 and full_validation_interval > 0
 
-        ckpt = cfg.get("init_checkpoint", None)
         reset_optax = bool(cfg.get("reset_optax_state", False))
         lr_schedule_name = str(cfg.eggroll.get("lr_schedule", "constant"))
-        if ckpt is not None and not reset_optax and lr_schedule_name != "constant":
+        if (
+            cfg.get("init_checkpoint", None) is not None
+            and not reset_optax
+            and lr_schedule_name != "constant"
+        ):
             raise ValueError(
                 "Warm-starting with reset_optax_state=false and a non-constant lr_schedule "
                 f"({lr_schedule_name!r}) is unsupported: the loaded optimiser state has no "
                 "schedule step counter. Set reset_optax_state=true."
             )
-        step_offset = 0
-        if ckpt is not None:
-            with open(ckpt, "rb") as f:
-                ckpt = pickle.load(f)
-            step_offset = int(ckpt.get("update_steps_completed", 0))
-            val_split = float(ckpt["validation_split"])
-            split_seed = int(ckpt["seed"])
-        else:
-            val_split = float(cfg.validation_split)
-            split_seed = seed
+        ws = _load_warmstart(cfg, seed)
+        ckpt, val_split, split_seed = ws.ckpt, ws.val_split, ws.split_seed
+        step_offset = ws.step_offset
 
         train_data, val_data = derive_train_val_split(dataset, val_split, split_seed)
         train_targets = _targets(train_data)
@@ -548,15 +617,8 @@ class EnsembleMLP(EnsembleDynamics):
             )(es_keys)
             es_axis = 0
 
-        if ckpt is not None:
-            _assert_params_loadable(stacked_params, ckpt["params"])
-            stacked_params = ckpt["params"]
-            if not reset_optax and ckpt.get("opt_state") is not None:
-                assert jax.tree.structure(opt_state) == jax.tree.structure(ckpt["opt_state"]), (
-                    "init_checkpoint opt_state structure mismatch (different solver?). "
-                    "Set reset_optax_state=true to start a fresh optimiser."
-                )
-                opt_state = ckpt["opt_state"]
+        stacked_params = _resume_params(stacked_params, ckpt)
+        opt_state = _resume_opt_state(opt_state, ckpt, reset_optax)
 
         pop = int(cfg.eggroll.population_size)
         n_prompts = pop if group_size == 0 else pop // group_size
@@ -584,7 +646,9 @@ class EnsembleMLP(EnsembleDynamics):
             new_nps, new_params = EggRoll.do_updates(
                 fnp, dict(nps), params_m, es_key_m, normalized, iterinfos, es_map
             )
-            return new_params, new_nps["opt_state"], jnp.mean(losses)
+            # Loss std across the population: the ES signal-to-noise diagnostic — near
+            # zero, the ranked fitnesses are dominated by noise and updates stall.
+            return new_params, new_nps["opt_state"], jnp.mean(losses), jnp.std(losses)
 
         vmapped_step = jax.vmap(
             member_step, in_axes=(0, 0, es_axis, None, None, None, None, None)
@@ -612,13 +676,14 @@ class EnsembleMLP(EnsembleDynamics):
             tgt_b = train_targets[idxs]
             iterinfos = get_iterinfos(epoch, pop)
 
-            params, opt_state, member_losses = vmapped_step(
+            params, opt_state, member_losses, member_loss_stds = vmapped_step(
                 params, opt_state, train_es_key, sigma, iterinfos, obs_b, action_b, tgt_b
             )
 
             if log_fn is not None:
                 _emit_eggroll_log(
                     log_fn, params, epoch, jnp.mean(member_losses),
+                    jnp.mean(member_loss_stds),
                     self._per_member_val_mse, val_obs, val_action, val_targets,
                     lr_schedule, sigma, n_prompts, pop, n_val, n_ens, num_elites,
                     log_interval, full_validation_interval, step_offset,
@@ -643,10 +708,12 @@ class EnsembleMLP(EnsembleDynamics):
         *absolute* next-state+reward and the real ones, masked over padded/post-terminal
         steps. The scalar is the masked mean over all valid steps/windows; the curve is the
         masked mean over windows at each horizon step (the compounding-error curve).
+        Windows are processed in fixed-size chunks (``eval_chunk_size`` scaled down by
+        the horizon) so peak memory is bounded regardless of how many windows tile out.
         """
 
-        def member(params_m):
-            def one_window(start_obs, actions_w, target_obs_w, target_reward_w, mask_w):
+        def one_window(w: TrajectoryWindows):
+            def member(params_m):
                 def step(carry_obs, inp):
                     a_t, tgt_o, tgt_r, m = inp
                     mean, _ = self._member_meanlogvar(params_m, carry_obs, a_t)
@@ -657,32 +724,38 @@ class EnsembleMLP(EnsembleDynamics):
                     return next_obs, jnp.where(m > 0, se, 0.0)
 
                 _, ses = jax.lax.scan(
-                    step, start_obs, (actions_w, target_obs_w, target_reward_w, mask_w)
+                    step, w.start_obs, (w.actions, w.target_obs, w.target_reward, w.mask)
                 )
                 return ses  # (T,)
 
-            ses = jax.vmap(one_window)(
-                windows.start_obs, windows.actions, windows.target_obs,
-                windows.target_reward, windows.mask,
-            )  # (W, T)
-            curve = ses.sum(axis=0) / jnp.maximum(windows.mask.sum(axis=0), 1.0)
-            scalar = ses.sum() / jnp.maximum(windows.mask.sum(), 1.0)
-            return scalar, curve
+            return jax.vmap(member)(params)  # (E, T)
 
-        return jax.vmap(member)(params)  # (E,), (E, T)
+        horizon = int(windows.actions.shape[1])
+        chunk = max(1, self._eval_chunk_size // max(horizon, 1))
+        ses = jax.lax.map(one_window, windows, batch_size=chunk)  # (W, E, T)
+        curve = ses.sum(axis=0) / jnp.maximum(windows.mask.sum(axis=0), 1.0)  # (E, T)
+        scalar = ses.sum(axis=(0, 2)) / jnp.maximum(windows.mask.sum(), 1.0)  # (E,)
+        return scalar, curve
+
+    def compute_traj_mse(
+        self, episodes: EpisodeBatch, horizon: int
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        """Open-loop rollout MSE over *episodes* at *horizon*: (all-member mean, elite
+        mean, all-member-mean per-step curve (T,)). The rollout analogue of
+        ``compute_val_mse``, for standalone evaluation (the wm_eval stage)."""
+        assert self._params is not None and self._elite_idxs is not None
+        windows = tile_episodes_to_windows(episodes, horizon)
+        per_member, curve = self._per_member_traj_mse(self._params, windows)
+        return per_member.mean(), per_member[self._elite_idxs].mean(), curve.mean(axis=0)
 
     def _ensemble_disagreement(self, params, obs, action) -> jax.Array:
         """Mean across features of the cross-member std of predicted means (diversity proxy).
 
-        Logged at the start and end of Phase 2 (when ``log_ensemble_disagreement``) to check
-        whether the fine-tune erodes the ensemble disagreement MOPO/MoReL rely on.
+        Logged at the start/end of Phase 2 and periodically during it (when
+        ``log_ensemble_disagreement``) to check whether the fine-tune erodes the
+        ensemble disagreement MOPO/MoReL rely on.
         """
-        means = jax.vmap(  # over members
-            lambda pm: jax.vmap(  # over transitions
-                lambda o, a: self._member_meanlogvar(pm, o, a)[0], in_axes=(0, 0)
-            )(obs, action)
-        )(params)  # (E, N, D)
-        return jnp.mean(jnp.std(means, axis=0))
+        return jnp.mean(jnp.std(self._ensemble_means(params, obs, action), axis=0))
 
     def _train_eggroll_trajectory(self, episodes, dataset, cfg, rng, seed, log_fn) -> None:
         pop = int(cfg.eggroll.population_size)
@@ -706,27 +779,24 @@ class EnsembleMLP(EnsembleDynamics):
         num_elites = self.num_elites
 
         # Warm-start is required: Phase 2 fine-tunes a Phase-1 (or earlier Phase-2) model.
-        ckpt_path = cfg.get("init_checkpoint", None)
-        assert ckpt_path is not None, (
+        assert cfg.get("init_checkpoint", None) is not None, (
             "trainer='eggroll_trajectory' requires init_checkpoint (a Phase-1 EnsembleMLP "
             "checkpoint to fine-tune)."
         )
         reset_optax = bool(cfg.get("reset_optax_state", True))
-        with open(ckpt_path, "rb") as f:
-            ckpt = pickle.load(f)
         # Transition split params come from the checkpoint (reproduce Phase-1's exact val
         # set so the transition-level metric stays comparable across phases).
-        val_split = float(ckpt["validation_split"])
-        split_seed = int(ckpt.get("seed", seed))
+        ws = _load_warmstart(cfg, seed)
+        assert ws.ckpt is not None
+        val_split, split_seed, step_offset = ws.val_split, ws.split_seed, ws.step_offset
         # Episode split fraction: from the checkpoint if it recorded one (Phase-2 →
         # Phase-2 / curriculum continuation), else from this run's cfg.
-        traj_val_split = ckpt.get("trajectory_validation_split", None)
+        traj_val_split = ws.ckpt.get("trajectory_validation_split", None)
         traj_val_split = (
             float(cfg.trajectory_validation_split)
             if traj_val_split is None
             else float(traj_val_split)
         )
-        step_offset = int(ckpt.get("update_steps_completed", 0))
 
         # Episode split (training windows + trajectory val) and the reproduced Phase-1
         # transition val set (for the comparable transition-level metric).
@@ -766,14 +836,8 @@ class EnsembleMLP(EnsembleDynamics):
             lambda k: simple_es_tree_key(single_params, k, scan_map)
         )(es_keys)
 
-        _assert_params_loadable(stacked_params, ckpt["params"])
-        stacked_params = ckpt["params"]
-        if not reset_optax and ckpt.get("opt_state") is not None:
-            assert jax.tree.structure(opt_state) == jax.tree.structure(ckpt["opt_state"]), (
-                "init_checkpoint opt_state structure mismatch (different solver?). "
-                "Set reset_optax_state=true to start a fresh optimiser."
-            )
-            opt_state = ckpt["opt_state"]
+        stacked_params = _resume_params(stacked_params, ws.ckpt)
+        opt_state = _resume_opt_state(opt_state, ws.ckpt, reset_optax)
 
         # Freeze the learnable logvar clamp bounds at their Phase-1 values. Two halves,
         # both required: EXCLUDED in es_map stops do_updates from persisting any change,
@@ -833,7 +897,9 @@ class EnsembleMLP(EnsembleDynamics):
             new_nps, new_params = EggRoll.do_updates(
                 fnp, dict(nps), params_m, es_key_m, normalized, iterinfos, es_map
             )
-            return new_params, new_nps["opt_state"], jnp.mean(per_pert)
+            # Loss std across the population: the ES signal-to-noise diagnostic — near
+            # zero, the ranked fitnesses are dominated by noise and updates stall.
+            return new_params, new_nps["opt_state"], jnp.mean(per_pert), jnp.std(per_pert)
 
         # vmap over members; windows + sigma + iterinfos shared (in_axes=None) so every
         # perturbation, including each antithetic ±sigma pair, sees identical inputs.
@@ -848,21 +914,32 @@ class EnsembleMLP(EnsembleDynamics):
 
         # Baseline log (gen 0): before-finetune trajectory/transition MSE + disagreement,
         # plus the train/val compounding-error curves of the warm-start (Phase-1) model.
+        # The curves go out under the same per-dataset panel keys the end-of-run log
+        # overwrites with init+final, so the init curves are visible from gen 0 (crash
+        # insurance) without extra panels.
+        init_curves: dict[str, list[float]] = {}
         if log_fn is not None:
             init_windows = tile_episodes_to_windows(val_eps, stages[0][0])
             tj_pm, init_val_curve = self._per_member_traj_mse(stacked_params, init_windows)
             init_train_windows = _sample_train_curve_windows(
                 train_eps, stages[0][0], int(init_windows.start_obs.shape[0]), split_seed
             )
-            _, init_train_curve = self._per_member_traj_mse(stacked_params, init_train_windows)
+            init_tr_pm, init_train_curve = self._per_member_traj_mse(
+                stacked_params, init_train_windows
+            )
+            init_curves = {
+                "train": _mean_curve_list(init_train_curve),
+                "val": _mean_curve_list(init_val_curve),
+            }
             metrics = dict(
                 val_traj_mse=float(tj_pm.mean()),
                 val_traj_mse_elite=float(jnp.sort(tj_pm)[:num_elites].mean()),
+                train_traj_mse=float(init_tr_pm.mean()),
                 lr=float(jnp.asarray(lr_schedule(0)) if callable(lr_schedule) else lr_schedule),
                 sigma=float(jnp.asarray(sigma_schedule(0))),
                 transitions_seen=0, forward_evals=0,
-                val_traj_mse_curve_init=_mean_curve_list(init_val_curve),
-                train_traj_mse_curve_init=_mean_curve_list(init_train_curve),
+                train_traj_mse_curve={"init": init_curves["train"]},
+                val_traj_mse_curve={"init": init_curves["val"]},
             )
             if log_transition:
                 tr_pm = self._per_member_val_mse(stacked_params, tv_obs, tv_action, tv_targets)
@@ -880,12 +957,17 @@ class EnsembleMLP(EnsembleDynamics):
         for stage_horizon, stage_epochs in stages:
             train_windows = tile_episodes_to_windows(train_eps, stage_horizon)
             val_windows = tile_episodes_to_windows(val_eps, stage_horizon)
+            # Fixed val-sized train-window subsample: gives the periodic validation a
+            # train-side trajectory MSE (overfitting-gap signal) at the val curve's cost.
+            train_eval_windows = _sample_train_curve_windows(
+                train_eps, stage_horizon, int(val_windows.start_obs.shape[0]), split_seed
+            )
             n_windows = int(train_windows.start_obs.shape[0])
             base = gen_base  # bind for the closure
 
             def train_epoch(epoch, carry, base=base, horizon=stage_horizon,
                             train_windows=train_windows, val_windows=val_windows,
-                            n_windows=n_windows):
+                            train_eval_windows=train_eval_windows, n_windows=n_windows):
                 rng, params, opt_state = carry
                 global_gen = base + epoch
                 sigma = sigma_schedule(global_gen)
@@ -893,15 +975,17 @@ class EnsembleMLP(EnsembleDynamics):
                 idxs = jax.random.randint(batch_rng, (batch_size,), 0, n_windows)
                 batch = jax.tree.map(lambda x: x[idxs], train_windows)
                 iterinfos = get_iterinfos(global_gen, pop)
-                params, opt_state, member_losses = vmapped_step(
+                params, opt_state, member_losses, member_loss_stds = vmapped_step(
                     params, opt_state, train_es_key, sigma, iterinfos, batch
                 )
                 if log_fn is not None:
                     lr_value = lr_schedule(global_gen) if callable(lr_schedule) else lr_schedule
                     _emit_traj_log(
                         log_fn, params, global_gen, jnp.mean(member_losses),
-                        self._per_member_traj_mse, val_windows,
-                        self._per_member_val_mse, tv_obs, tv_action, tv_targets, log_transition,
+                        jnp.mean(member_loss_stds),
+                        self._per_member_traj_mse, val_windows, train_eval_windows,
+                        self._val_mse_and_disagreement, tv_obs, tv_action, tv_targets,
+                        log_transition, log_disagreement,
                         lr_value, sigma, num_elites, batch_size, horizon, pop, n_ens,
                         log_interval, full_validation_interval, step_offset,
                     )
@@ -925,17 +1009,26 @@ class EnsembleMLP(EnsembleDynamics):
         self._trajectory_validation_split = float(traj_val_split)
         self._seed = int(split_seed)
 
-        # Final per-step MSE-vs-step curves (headline, train + val) + end-of-run disagreement.
+        # End-of-run headline: one compounding-error panel per dataset (train, val), each
+        # overlaying init vs final (see Logger.log_world_model_finetune_curves), plus
+        # final scalars so the W&B run summary carries the end-of-run trajectory MSE.
         if log_fn is not None:
             final_train_windows = _sample_train_curve_windows(
                 train_eps, final_horizon, int(final_val_windows.start_obs.shape[0]), split_seed
             )
-            _, train_curve = self._per_member_traj_mse(params, final_train_windows)
-            # Each per-step compounding-error curve goes to a single line panel (see
-            # Logger.log_world_model_finetune_curve), not T separate scalar metrics.
+            train_pm, train_curve = self._per_member_traj_mse(params, final_train_windows)
             metrics: dict = {
-                "val_traj_mse_curve": _mean_curve_list(curve),
-                "train_traj_mse_curve": _mean_curve_list(train_curve),
+                "train_traj_mse_curve": {
+                    "init": init_curves["train"],
+                    "final": _mean_curve_list(train_curve),
+                },
+                "val_traj_mse_curve": {
+                    "init": init_curves["val"],
+                    "final": _mean_curve_list(curve),
+                },
+                "val_traj_mse": float(per_member_scalar.mean()),
+                "val_traj_mse_elite": float(jnp.sort(per_member_scalar)[:num_elites].mean()),
+                "train_traj_mse": float(train_pm.mean()),
             }
             if log_disagreement:
                 metrics["ensemble_disagreement"] = float(
@@ -1037,7 +1130,8 @@ def _emit_backprop_log(
 
 
 def _emit_eggroll_log(
-    log_fn, params, epoch, train_loss, per_member_val_mse, val_obs, val_action, val_targets,
+    log_fn, params, epoch, train_loss, fitness_std,
+    per_member_val_mse, val_obs, val_action, val_targets,
     lr_schedule, sigma, n_prompts, pop, n_val, n_ens, num_elites,
     log_interval, full_validation_interval, step_offset,
 ) -> None:
@@ -1050,31 +1144,32 @@ def _emit_eggroll_log(
     # forward_evals scales by n_ens (per-member population + val); transitions do not.
     pop_n, nval_n = pop * n_ens, n_val * n_ens
 
-    def _train_cb(step_i, loss_i, lr_i, sigma_i) -> None:
+    def _train_cb(step_i, loss_i, std_i, lr_i, sigma_i) -> None:
         s = int(step_i)
         t, f = _eggroll_work_counters(s, n_prompts, pop_n, nval_n, full_validation_interval)
         log_fn(
             s + step_offset, float(loss_i), float("nan"), t, f,
-            lr=float(lr_i), sigma=float(sigma_i),
+            lr=float(lr_i), sigma=float(sigma_i), fitness_std=float(std_i),
         )
 
-    def _val_cb(step_i, loss_i, val_mse_i, val_elite_i, lr_i, sigma_i) -> None:
+    def _val_cb(step_i, loss_i, std_i, val_mse_i, val_elite_i, lr_i, sigma_i) -> None:
         s = int(step_i)
         t, f = _eggroll_work_counters(s, n_prompts, pop_n, nval_n, full_validation_interval)
         log_fn(
             s + step_offset, float(loss_i), float(val_mse_i), t, f,
             lr=float(lr_i), sigma=float(sigma_i), val_mse_elite=float(val_elite_i),
+            fitness_std=float(std_i),
         )
 
     def _with_val(_):
         per_member = per_member_val_mse(params, val_obs, val_action, val_targets)
         jax.debug.callback(
-            _val_cb, step, train_loss, per_member.mean(),
+            _val_cb, step, train_loss, fitness_std, per_member.mean(),
             jnp.sort(per_member)[:num_elites].mean(), lr_value, sigma,
         )
 
     def _train_only(_):
-        jax.debug.callback(_train_cb, step, train_loss, lr_value, sigma)
+        jax.debug.callback(_train_cb, step, train_loss, fitness_std, lr_value, sigma)
 
     jax.lax.cond(
         ((epoch + 1) % log_interval == 0) | should_validate,
@@ -1085,17 +1180,22 @@ def _emit_eggroll_log(
 
 
 def _emit_traj_log(
-    log_fn, params, global_gen, train_nll,
-    per_member_traj_mse, val_windows,
-    per_member_val_mse, tv_obs, tv_action, tv_targets, log_transition,
+    log_fn, params, global_gen, train_nll, fitness_std,
+    per_member_traj_mse, val_windows, train_eval_windows,
+    val_mse_and_disagreement, tv_obs, tv_action, tv_targets,
+    log_transition, log_disagreement,
     lr_value, sigma, num_elites, batch_size, horizon, pop, n_ens,
     log_interval, full_validation_interval, step_offset,
 ) -> None:
     """Phase-2 logging: training NLL + MSE-only validation, on the ``world_model_ft`` axis.
 
     The Phase-2 ``log_fn`` takes ``(generation, **metrics)`` (its own W&B namespace), unlike
-    the positional one-step ``log_fn``. Validation is MSE-only (NLL is a training diagnostic);
-    each metric is reported as all-member mean + elite-mean, per the Phase-1 convention.
+    the positional one-step ``log_fn``. Validation is MSE-only (NLL is a training
+    diagnostic), reported on both splits — the train side on the fixed val-sized window
+    subsample, so the gap between them is the overfitting signal — plus the val curve at
+    fixed rollout depths (h=1 / mid / last; under a curriculum these track the current
+    stage's horizon). ``fitness_std`` is the within-generation std of per-perturbation
+    fitness, the ES signal-to-noise diagnostic.
     """
     step = global_gen + 1
     should_validate = (global_gen == 0) | (step % full_validation_interval == 0)
@@ -1106,37 +1206,39 @@ def _emit_traj_log(
     def _fe(s: int) -> int:  # forward-evals proxy (scaled by population and ensemble)
         return s * batch_size * horizon * pop * n_ens
 
-    def _train_cb(step_i, nll_i, lr_i, sigma_i) -> None:
+    def _cb(step_i, vals: dict) -> None:
         s = int(step_i)
         log_fn(
-            s + step_offset, train_loss=float(nll_i), lr=float(lr_i), sigma=float(sigma_i),
-            transitions_seen=_ts(s), forward_evals=_fe(s),
+            s + step_offset, transitions_seen=_ts(s), forward_evals=_fe(s),
+            **{k: float(v) for k, v in vals.items()},
         )
 
-    def _val_cb(step_i, nll_i, tj_i, tj_e_i, tr_i, tr_e_i, lr_i, sigma_i) -> None:
-        s = int(step_i)
-        metrics = dict(
-            train_loss=float(nll_i), val_traj_mse=float(tj_i),
-            val_traj_mse_elite=float(tj_e_i), lr=float(lr_i), sigma=float(sigma_i),
-            transitions_seen=_ts(s), forward_evals=_fe(s),
-        )
-        if log_transition:
-            metrics["val_transition_mse"] = float(tr_i)
-            metrics["val_transition_mse_elite"] = float(tr_e_i)
-        log_fn(s + step_offset, **metrics)
+    base_vals = dict(train_loss=train_nll, fitness_std=fitness_std, lr=lr_value, sigma=sigma)
 
     def _with_val(_):
-        tj_pm, _ = per_member_traj_mse(params, val_windows)
-        tj, tj_e = tj_pm.mean(), jnp.sort(tj_pm)[:num_elites].mean()
-        if log_transition:
-            tr_pm = per_member_val_mse(params, tv_obs, tv_action, tv_targets)
-            tr, tr_e = tr_pm.mean(), jnp.sort(tr_pm)[:num_elites].mean()
-        else:
-            tr = tr_e = jnp.asarray(jnp.nan)
-        jax.debug.callback(_val_cb, step, train_nll, tj, tj_e, tr, tr_e, lr_value, sigma)
+        tj_pm, curve = per_member_traj_mse(params, val_windows)
+        curve_mean = curve.mean(axis=0)  # (T,)
+        train_pm, _ = per_member_traj_mse(params, train_eval_windows)
+        vals = dict(
+            base_vals,
+            val_traj_mse=tj_pm.mean(),
+            val_traj_mse_elite=jnp.sort(tj_pm)[:num_elites].mean(),
+            train_traj_mse=train_pm.mean(),
+            val_traj_mse_h1=curve_mean[0],
+            val_traj_mse_hmid=curve_mean[(horizon - 1) // 2],
+            val_traj_mse_hlast=curve_mean[-1],
+        )
+        if log_transition or log_disagreement:
+            tr_pm, disagreement = val_mse_and_disagreement(params, tv_obs, tv_action, tv_targets)
+            if log_transition:
+                vals["val_transition_mse"] = tr_pm.mean()
+                vals["val_transition_mse_elite"] = jnp.sort(tr_pm)[:num_elites].mean()
+            if log_disagreement:
+                vals["ensemble_disagreement"] = disagreement
+        jax.debug.callback(_cb, step, vals)
 
     def _train_only(_):
-        jax.debug.callback(_train_cb, step, train_nll, lr_value, sigma)
+        jax.debug.callback(_cb, step, base_vals)
 
     jax.lax.cond(
         (step % log_interval == 0) | should_validate,

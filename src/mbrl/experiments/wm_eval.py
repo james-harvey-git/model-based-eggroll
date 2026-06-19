@@ -5,6 +5,11 @@ single scalar matching that world model's training-time ``val_mse`` (or
 ``val_mse_elite`` for ensembles). Used to probe OOD robustness by evaluating a
 checkpoint trained on one behavioural-policy dataset against another (e.g. a
 ``halfcheetah-medium`` checkpoint vs ``halfcheetah-expert`` data).
+
+When ``cfg.wm_eval.traj_horizon > 0`` (and the model class supports it) the open-loop
+rollout MSE and its per-step compounding-error curve are also reported — one-step MSE
+correlates only weakly with rollout usefulness, so this is the headline model-quality
+number for MBRL.
 """
 
 from pathlib import Path
@@ -12,7 +17,7 @@ import pickle
 
 from omegaconf import DictConfig
 
-from mbrl.data import load_dataset
+from mbrl.data import load_dataset, load_episodes
 from mbrl.logger import Logger
 from mbrl.world_models.base import load_world_model_from_checkpoint
 
@@ -46,4 +51,30 @@ def run(cfg: DictConfig, logger: Logger) -> None:
         f"wm_eval: train={ckpt['dataset_id']} eval={info.dataset_id} "
         f"val_mse={val_mse:.6f}"
     )
-    logger.log_wm_eval(ckpt["dataset_id"], info.dataset_id, val_mse)
+
+    # Open-loop rollout MSE over the full eval dataset (when evaluating the training
+    # dataset itself this includes its training split — fine for cross-dataset probing,
+    # but not a held-out number).
+    traj_kwargs: dict = {}
+    traj_horizon = int(cfg.get("wm_eval", {}).get("traj_horizon", 0) or 0)
+    if traj_horizon > 0:
+        compute_traj_mse = getattr(world_model, "compute_traj_mse", None)
+        if compute_traj_mse is not None:
+            episodes, _ = load_episodes(cfg.dataset.name)
+            traj_mse, traj_mse_elite, curve = compute_traj_mse(episodes, traj_horizon)
+            traj_kwargs = dict(
+                traj_mse=float(traj_mse),
+                traj_mse_elite=float(traj_mse_elite),
+                traj_mse_curve=[float(v) for v in curve],
+            )
+            print(
+                f"wm_eval: traj_mse@h{traj_horizon}={traj_kwargs['traj_mse']:.6f} "
+                f"(elite {traj_kwargs['traj_mse_elite']:.6f})"
+            )
+        else:
+            print(
+                "wm_eval: world-model class has no compute_traj_mse; "
+                "skipping rollout evaluation."
+            )
+
+    logger.log_wm_eval(ckpt["dataset_id"], info.dataset_id, val_mse, **traj_kwargs)

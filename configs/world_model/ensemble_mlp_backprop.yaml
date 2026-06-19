@@ -14,6 +14,14 @@ lr: 1e-3
 optimizer: adamw                  # sgd | adam | adamw
 optimizer_kwargs: {eps: 1e-5, weight_decay: 2.5e-5}  # solver-specific (e.g. {momentum: 0.9} for sgd)
 validation_split: 0.2
+# Keep each member's best-by-holdout params (snapshotted at epoch boundaries) rather
+# than its last step — the MBPO/deep-ensembles recipe. Costs one val pass per epoch.
+keep_best: true
+# Chunk size for full-set evaluations (val MSE, rollout curves): bounds peak memory.
+eval_chunk_size: 16384
+# false drops the optimiser state from the checkpoint (halves size; only fine-tunes
+# with reset_optax_state=false need it).
+save_opt_state: false
 logvar_diff_coef: 0.01
 max_logvar_init: 0.5
 min_logvar_init: -10.0

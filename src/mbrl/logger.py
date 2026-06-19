@@ -124,18 +124,32 @@ def _legend_fields(cfg: DictConfig) -> dict:
     for k in ("num_ensemble", "num_elites"):
         if k in wm:
             fields[k] = wm[k]
-    if wm.get("trainer") == "eggroll" and "eggroll" in wm:
+    if wm.get("trainer") in ("eggroll", "eggroll_trajectory") and "eggroll" in wm:
         eg = wm.eggroll
         fields["lr"] = eg.get("lr")
         fields["population_size"] = eg.get("population_size")
         fields["sigma"] = eg.get("sigma")
-        fields["group_size"] = eg.get("group_size")
-        fields["use_shared_perturbations"] = bool(wm.get("use_shared_perturbations", False))
+        if wm.get("trainer") == "eggroll":
+            fields["group_size"] = eg.get("group_size")
+            fields["use_shared_perturbations"] = bool(wm.get("use_shared_perturbations", False))
+        else:  # trajectory fine-tune: the swept knobs are horizon + window batch size
+            fields["horizon"] = wm.get("horizon")
+            fields["batch_size"] = wm.get("batch_size")
     else:
         if "lr" in wm:
             fields["lr"] = wm.lr
         if "batch_size" in wm:
             fields["batch_size"] = wm.batch_size
+    # Combined two-phase runs: also promote the Phase-2 knobs (ft_ prefix) so sweep
+    # tables for world_model.finetune=true runs show what the fine-tune varied.
+    if bool(wm.get("finetune", False)) and "finetune_world_model" in cfg:
+        ft = cfg.finetune_world_model
+        fields["ft_horizon"] = ft.get("horizon")
+        fields["ft_batch_size"] = ft.get("batch_size")
+        if "eggroll" in ft:
+            fields["ft_lr"] = ft.eggroll.get("lr")
+            fields["ft_population_size"] = ft.eggroll.get("population_size")
+            fields["ft_sigma"] = ft.eggroll.get("sigma")
     return fields
 
 
@@ -317,6 +331,27 @@ class Logger:
             {f"world_model_ft/{name}": wandb.plot.line(table, "rollout_step", "mse", title=name)}
         )
 
+    def log_world_model_finetune_curves(self, name: str, curves: dict) -> None:
+        """Overlay several per-rollout-step curves in one ``world_model_ft/<name>`` panel.
+
+        ``curves`` maps series name -> list of per-step values (e.g. train/val ×
+        init/final trajectory MSE), so the generalisation gap and the before/after effect
+        of the fine-tune are readable from a single chart. Per-series x values support
+        different curve lengths (a horizon curriculum's init and final stages differ).
+        """
+        if not self.enabled:
+            return
+        keys = list(curves)
+        ys = [[float(v) for v in curves[k]] for k in keys]
+        xs = [list(range(1, len(y) + 1)) for y in ys]
+        wandb.log(
+            {
+                f"world_model_ft/{name}": wandb.plot.line_series(
+                    xs=xs, ys=ys, keys=keys, title=name, xname="rollout_step"
+                )
+            }
+        )
+
     def log_policy_step(self, step: int, **metrics: float) -> None:
         """Log policy training metrics (return, entropy, critic loss, etc.).
 
@@ -341,14 +376,34 @@ class Logger:
             }
         )
 
-    def log_wm_eval(self, train_dataset_id: str, eval_dataset_id: str, val_mse: float) -> None:
-        """Log a world-model validation MSE on an arbitrary eval dataset."""
+    def log_wm_eval(
+        self,
+        train_dataset_id: str,
+        eval_dataset_id: str,
+        val_mse: float,
+        traj_mse: float | None = None,
+        traj_mse_elite: float | None = None,
+        traj_mse_curve: list[float] | None = None,
+    ) -> None:
+        """Log world-model eval metrics on an arbitrary eval dataset: the one-step val
+        MSE, plus (when provided) the open-loop rollout MSE and its per-step curve."""
         if not self.enabled:
             return
-        wandb.log(
-            {
-                "wm_eval/val_mse": val_mse,
-                "wm_eval/train_dataset_id": train_dataset_id,
-                "wm_eval/eval_dataset_id": eval_dataset_id,
-            }
-        )
+        metrics: dict = {
+            "wm_eval/val_mse": val_mse,
+            "wm_eval/train_dataset_id": train_dataset_id,
+            "wm_eval/eval_dataset_id": eval_dataset_id,
+        }
+        if traj_mse is not None:
+            metrics["wm_eval/traj_mse"] = traj_mse
+        if traj_mse_elite is not None:
+            metrics["wm_eval/traj_mse_elite"] = traj_mse_elite
+        if traj_mse_curve is not None:
+            table = wandb.Table(
+                data=[[i + 1, float(y)] for i, y in enumerate(traj_mse_curve)],
+                columns=["rollout_step", "mse"],
+            )
+            metrics["wm_eval/traj_mse_curve"] = wandb.plot.line(
+                table, "rollout_step", "mse", title="traj_mse_curve"
+            )
+        wandb.log(metrics)
