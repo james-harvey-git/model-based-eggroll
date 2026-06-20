@@ -21,12 +21,12 @@ disable_logvar_predictions: true
 init_checkpoint: null
 reset_optax_state: true           # fresh optimiser for the new (trajectory) objective
 
-num_epochs: 10000                 # EGGROLL generations (placeholder; tune empirically)
+num_epochs: 1000000                 # EGGROLL generations (placeholder; tune empirically)
 horizon: 5                        # rollout length T; ignored if `curriculum` is set
 # Optional in-process horizon curriculum (re-tiles + carries params across stages):
 #   curriculum: [{horizon: 3, num_epochs: 3000}, {horizon: 6, num_epochs: 7000}]
 curriculum: null
-batch_size: 4                     # trajectory windows per generation (shared across population)
+batch_size: 16                     # trajectory windows per generation (shared across population)
 
 logvar_diff_coef: 0.01            # lambda; clamp regulariser added once per rollout
 freeze_logvar_clamp: false        # ablation: hold max/min_logvar at Phase-1 values (no perturb, no update)
@@ -54,7 +54,7 @@ eggroll:
   sigma: 0.01                     # to be swept
   # Decays sigma to ~5% of its initial value by num_epochs=10000 (0.05 ** (1/10000)).
   # Recompute by hand if num_epochs changes.
-  sigma_decay_rate: 0.9997
+  sigma_decay_rate: 0.9999994
   sigma_schedule: exponential     # constant | exponential | cosine | linear
   sigma_schedule_kwargs: {}
   lr: 0.01
