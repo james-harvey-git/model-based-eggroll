@@ -601,6 +601,70 @@ class TestEnsembleMLPTrajectory:
         for k in ("val_traj_mse", "val_traj_mse_elite", "train_traj_mse"):
             assert np.isfinite(last[k])
 
+    def test_logs_normalized_nmse_curves(self, backprop_model, synthetic_dataset, tmp_path):
+        """The normalized skill-score panels overlay model/persistence curves on a flat
+        mean_state=1.0 reference, leaving the raw mse panels untouched."""
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt)), synthetic_dataset, _toy_episodes(), 0,
+            log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        first, last = rows[0], rows[-1]
+        for key in ("train_traj_nmse_curve", "val_traj_nmse_curve"):
+            assert set(first[key]) == {"init", "persistence", "mean_state"}
+            assert set(last[key]) == {"init", "final", "persistence", "mean_state"}
+            assert last[key]["mean_state"] == [1.0, 1.0]  # flat reference line
+            for series in last[key].values():
+                assert all(np.isfinite(v) for v in series)
+        # Raw mse panels are unchanged (no baselines mixed in).
+        assert set(last["val_traj_mse_curve"]) == {"init", "final"}
+
+    def test_logs_rollout_figures(self, backprop_model, synthetic_dataset, tmp_path):
+        """Figures are emitted at end of run, and at gen 0 only when explicitly enabled."""
+        from matplotlib.figure import Figure
+
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt), log_init_rollout_figures=True),
+            synthetic_dataset, _toy_episodes(), 0, log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        first, last = rows[0], rows[-1]
+        assert "rollout_figures" in first and "rollout_figures" in last
+        figs = last["rollout_figures"]
+        assert "rollout_nmse_heatmap" in figs
+        assert {"rollout_ts_best", "rollout_ts_median", "rollout_ts_worst"} <= set(figs)
+        assert all(isinstance(f, Figure) for f in figs.values())
+
+        rows2: list[dict] = []
+        _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt)),  # default: no gen-0 figures
+            synthetic_dataset, _toy_episodes(), 0, log_fn=lambda gen, **kw: rows2.append(kw),
+        )
+        assert "rollout_figures" not in rows2[0]
+        assert "rollout_figures" in rows2[-1]
+
+    def test_compute_traj_grounding(self, backprop_model, synthetic_dataset, tmp_path):
+        """The wm_eval retrofit entry point bundles rollout MSE, the raw curve, the
+        normalized overlay, and the figures from a loaded checkpoint."""
+        import matplotlib.pyplot as plt
+
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        model = _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt)), synthetic_dataset, _toy_episodes(), 0
+        )
+        traj_mse, elite, raw, nmse, figs = model.compute_traj_grounding(
+            _toy_episodes(), 3, DATASET_ID
+        )
+        assert np.isfinite(traj_mse) and np.isfinite(elite)
+        assert len(raw) == 3
+        assert set(nmse) == {"final", "persistence", "mean_state"}
+        assert nmse["mean_state"] == [1.0, 1.0, 1.0]
+        assert "rollout_nmse_heatmap" in figs
+        for f in figs.values():
+            plt.close(f)
+
     def test_val_transition_toggle_off(self, backprop_model, synthetic_dataset, tmp_path):
         ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
         rows: list[dict] = []

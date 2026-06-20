@@ -352,6 +352,23 @@ class Logger:
             }
         )
 
+    def log_world_model_finetune_image(self, name: str, fig, generation: int) -> None:
+        """Log a matplotlib figure on the ``world_model_ft`` axis, then close it.
+
+        Logged against ``world_model_ft/generation`` so the pre-fine-tune (gen 0) and
+        end-of-run frames are distinct entries in the media panel.
+        """
+        import matplotlib.pyplot as plt
+
+        if self.enabled:
+            wandb.log(
+                {
+                    f"world_model_ft/{name}": wandb.Image(fig),
+                    "world_model_ft/generation": int(generation),
+                }
+            )
+        plt.close(fig)
+
     def log_policy_step(self, step: int, **metrics: float) -> None:
         """Log policy training metrics (return, entropy, critic loss, etc.).
 
@@ -384,10 +401,19 @@ class Logger:
         traj_mse: float | None = None,
         traj_mse_elite: float | None = None,
         traj_mse_curve: list[float] | None = None,
+        traj_nmse_curve: dict | None = None,
+        figures: dict | None = None,
     ) -> None:
         """Log world-model eval metrics on an arbitrary eval dataset: the one-step val
-        MSE, plus (when provided) the open-loop rollout MSE and its per-step curve."""
+        MSE, plus (when provided) the open-loop rollout MSE, its raw per-step curve, the
+        normalized (skill-score) overlay vs the trivial-predictor baselines, and the
+        rollout-inspection figures."""
+        import matplotlib.pyplot as plt
+
         if not self.enabled:
+            if figures:
+                for fig in figures.values():
+                    plt.close(fig)
             return
         metrics: dict = {
             "wm_eval/val_mse": val_mse,
@@ -406,4 +432,17 @@ class Logger:
             metrics["wm_eval/traj_mse_curve"] = wandb.plot.line(
                 table, "rollout_step", "mse", title="traj_mse_curve"
             )
+        if traj_nmse_curve is not None:
+            keys = list(traj_nmse_curve)
+            ys = [[float(v) for v in traj_nmse_curve[k]] for k in keys]
+            xs = [list(range(1, len(y) + 1)) for y in ys]
+            metrics["wm_eval/traj_nmse_curve"] = wandb.plot.line_series(
+                xs=xs, ys=ys, keys=keys, title="traj_nmse_curve", xname="rollout_step"
+            )
+        if figures is not None:
+            for name, fig in figures.items():
+                metrics[f"wm_eval/{name}"] = wandb.Image(fig)
         wandb.log(metrics)
+        if figures is not None:
+            for fig in figures.values():
+                plt.close(fig)

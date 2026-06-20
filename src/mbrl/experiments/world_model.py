@@ -93,10 +93,15 @@ def _make_traj_log_fn(logger: Logger, start_time: float):
     Reserved keys containing ``_curve`` are routed to line-chart panels rather than
     logged as scalars: a dict value (series name -> per-step list, e.g.
     ``{train,val}_traj_mse_curve`` each overlaying init vs final) becomes one
-    line_series panel; a plain list becomes a single-line panel.
+    line_series panel; a plain list becomes a single-line panel. The reserved
+    ``rollout_figures`` key (a dict name -> matplotlib Figure) is logged as images.
     """
 
     def log_fn(generation: int, **metrics) -> None:
+        figures = metrics.pop("rollout_figures", None)
+        if figures is not None:
+            for name, fig in figures.items():
+                logger.log_world_model_finetune_image(name, fig, int(generation))
         for key in [k for k in metrics if "_curve" in k]:
             value = metrics.pop(key)
             if isinstance(value, dict):
