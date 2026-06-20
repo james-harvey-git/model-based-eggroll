@@ -602,8 +602,9 @@ class TestEnsembleMLPTrajectory:
             assert np.isfinite(last[k])
 
     def test_logs_normalized_nmse_curves(self, backprop_model, synthetic_dataset, tmp_path):
-        """The normalized skill-score panels overlay model/persistence curves on a flat
-        mean_state=1.0 reference, leaving the raw mse panels untouched."""
+        """The normalized skill-score panels overlay the model curves on a flat
+        mean_state=1.0 reference (persistence off by default), leaving the raw mse panels
+        untouched."""
         ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
         rows: list[dict] = []
         _train_traj(
@@ -612,13 +613,24 @@ class TestEnsembleMLPTrajectory:
         )
         first, last = rows[0], rows[-1]
         for key in ("train_traj_nmse_curve", "val_traj_nmse_curve"):
-            assert set(first[key]) == {"init", "persistence", "mean_state"}
-            assert set(last[key]) == {"init", "final", "persistence", "mean_state"}
+            assert set(first[key]) == {"init", "mean_state"}  # persistence off by default
+            assert set(last[key]) == {"init", "final", "mean_state"}
             assert last[key]["mean_state"] == [1.0, 1.0]  # flat reference line
             for series in last[key].values():
                 assert all(np.isfinite(v) for v in series)
         # Raw mse panels are unchanged (no baselines mixed in).
         assert set(last["val_traj_mse_curve"]) == {"init", "final"}
+
+    def test_persistence_baseline_opt_in(self, backprop_model, synthetic_dataset, tmp_path):
+        """Persistence appears on the normalized panels only when explicitly enabled."""
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt), log_persistence_baseline=True),
+            synthetic_dataset, _toy_episodes(), 0, log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        last = rows[-1]
+        assert set(last["val_traj_nmse_curve"]) == {"init", "final", "persistence", "mean_state"}
 
     def test_logs_rollout_figures(self, backprop_model, synthetic_dataset, tmp_path):
         """Figures are emitted at end of run, and at gen 0 only when explicitly enabled."""
@@ -659,10 +671,17 @@ class TestEnsembleMLPTrajectory:
         )
         assert np.isfinite(traj_mse) and np.isfinite(elite)
         assert len(raw) == 3
-        assert set(nmse) == {"final", "persistence", "mean_state"}
+        assert set(nmse) == {"final", "mean_state"}  # persistence off by default
         assert nmse["mean_state"] == [1.0, 1.0, 1.0]
         assert "rollout_nmse_heatmap" in figs
         for f in figs.values():
+            plt.close(f)
+        # Opt-in persistence is included when requested.
+        *_, nmse_p, figs_p = model.compute_traj_grounding(
+            _toy_episodes(), 3, DATASET_ID, include_persistence=True
+        )
+        assert "persistence" in nmse_p
+        for f in figs_p.values():
             plt.close(f)
 
     def test_val_transition_toggle_off(self, backprop_model, synthetic_dataset, tmp_path):

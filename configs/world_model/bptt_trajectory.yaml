@@ -49,6 +49,10 @@ log_ensemble_disagreement: true   # cross-member std at start/end + every full v
 # halfcheetah phase portraits) at gen 0 for a before/after fine-tune comparison. They are
 # always rendered at end of run; the gen-0 pass is off by default as it is not free.
 log_init_rollout_figures: false
+# Overlay the open-loop zero-delta (persistence) baseline on the normalized panels. Off by
+# default: on oscillatory dynamics it overshoots the mean_state=1.0 line and inflates the
+# y-range; enable it for slow-dynamics datasets where it is the binding bar to beat.
+log_persistence_baseline: false
 # Chunk size for full-set evaluations (val MSE, rollout curves): bounds peak memory.
 eval_chunk_size: 16384
 # false drops the optimiser state from the checkpoint (halves size; only fine-tunes

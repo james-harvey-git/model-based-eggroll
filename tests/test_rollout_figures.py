@@ -36,6 +36,14 @@ class TestBaselines:
         assert len(curves["mean_state"]) == 3 and len(curves["persistence"]) == 3
         assert all(v >= 0 for v in curves["mean_state"] + curves["persistence"])
 
+    def test_persistence_omitted_when_disabled(self):
+        win = _windows()
+        curves = _traj_baseline_curves(
+            win, win.target_obs.mean(axis=(0, 1)), win.target_reward.mean(),
+            include_persistence=False,
+        )
+        assert set(curves) == {"mean_state"}
+
     def test_mean_state_matches_variance(self):
         """The mean-predictor's per-step error equals the per-step target variance — the
         defining property of the 'blind average state' baseline."""
@@ -76,6 +84,10 @@ class TestNormalization:
         assert out["mean_state"] == [1.0, 1.0, 1.0]
         np.testing.assert_allclose(out["final"], [0.5, 1 / 3, 0.25])
         np.testing.assert_allclose(out["persistence"], [0.25, 0.5, 0.5])
+
+    def test_persistence_omitted_when_absent(self):
+        out = _normalized_curve_dict({"final": [2.0, 4.0]}, {"mean_state": [4.0, 8.0]})
+        assert set(out) == {"final", "mean_state"}
 
     def test_curve_equal_to_mean_state_normalizes_to_one(self):
         """A model whose rollout MSE equals the mean-state baseline scores exactly 1.0

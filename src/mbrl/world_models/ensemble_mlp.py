@@ -760,23 +760,27 @@ class EnsembleMLP(EnsembleDynamics):
         return per_member.mean(), per_member[self._elite_idxs].mean(), curve.mean(axis=0)
 
     def compute_traj_grounding(
-        self, episodes: EpisodeBatch, horizon: int, dataset_id: str
+        self,
+        episodes: EpisodeBatch,
+        horizon: int,
+        dataset_id: str,
+        include_persistence: bool = False,
     ) -> tuple[float, float, list[float], dict, dict]:
         """Standalone-eval grounding for an open-loop rollout over *episodes* at *horizon*.
 
         Returns ``(traj_mse, traj_mse_elite, raw_curve, nmse_curve, figures)``: the
         all-member / elite rollout MSE, the raw per-step compounding-error curve, the
         normalized skill-score overlay vs the trivial-predictor baselines (``mean_state``
-        flat at 1.0, ``final`` and ``persistence`` as ratios), and the rollout-inspection
-        figures. Lets pre-existing checkpoints be retrofitted with the same grounding the
-        trajectory trainers log natively.
+        flat at 1.0, ``final`` and — when ``include_persistence`` — ``persistence`` as
+        ratios), and the rollout-inspection figures. Lets pre-existing checkpoints be
+        retrofitted with the same grounding the trajectory trainers log natively.
         """
         assert self._params is not None and self._elite_idxs is not None
         windows = tile_episodes_to_windows(episodes, horizon)
         per_member, curve = self._per_member_traj_mse(self._params, windows)
         raw = _mean_curve_list(curve)
         obs_mean, reward_mean = _episode_obs_reward_mean(episodes)
-        baselines = _traj_baseline_curves(windows, obs_mean, reward_mean)
+        baselines = _traj_baseline_curves(windows, obs_mean, reward_mean, include_persistence)
         nmse = _normalized_curve_dict({"final": raw}, baselines)
         figures = self.build_rollout_figures(self._params, windows, dataset_id)
         return (
@@ -959,6 +963,7 @@ class EnsembleMLP(EnsembleDynamics):
         base_obs_mean, base_reward_mean = _episode_obs_reward_mean(train_eps)
         dataset_id = str(ws.ckpt.get("dataset_id", ""))
         log_init_figs = bool(cfg.get("log_init_rollout_figures", False))
+        log_persistence = bool(cfg.get("log_persistence_baseline", False))
 
         lr_schedule = _resolve_schedule(cfg.eggroll, "lr", "lr_schedule", "lr_schedule_kwargs")
         sigma_schedule = _resolve_sigma_schedule(cfg.eggroll)
@@ -1084,9 +1089,11 @@ class EnsembleMLP(EnsembleDynamics):
                 "val": _mean_curve_list(init_val_curve),
             }
             train_baselines = _traj_baseline_curves(
-                init_train_windows, base_obs_mean, base_reward_mean
+                init_train_windows, base_obs_mean, base_reward_mean, log_persistence
             )
-            val_baselines = _traj_baseline_curves(init_windows, base_obs_mean, base_reward_mean)
+            val_baselines = _traj_baseline_curves(
+                init_windows, base_obs_mean, base_reward_mean, log_persistence
+            )
             metrics = dict(
                 val_traj_mse=float(tj_pm.mean()),
                 val_traj_mse_elite=float(jnp.sort(tj_pm)[:num_elites].mean()),
@@ -1186,10 +1193,10 @@ class EnsembleMLP(EnsembleDynamics):
             train_curves = {"init": init_curves["train"], "final": _mean_curve_list(train_curve)}
             val_curves = {"init": init_curves["val"], "final": _mean_curve_list(curve)}
             train_baselines = _traj_baseline_curves(
-                final_train_windows, base_obs_mean, base_reward_mean
+                final_train_windows, base_obs_mean, base_reward_mean, log_persistence
             )
             val_baselines = _traj_baseline_curves(
-                final_val_windows, base_obs_mean, base_reward_mean
+                final_val_windows, base_obs_mean, base_reward_mean, log_persistence
             )
             metrics: dict = {
                 "train_traj_mse_curve": train_curves,
@@ -1270,6 +1277,7 @@ class EnsembleMLP(EnsembleDynamics):
         base_obs_mean, base_reward_mean = _episode_obs_reward_mean(train_eps)
         dataset_id = str(ws.ckpt.get("dataset_id", ""))
         log_init_figs = bool(cfg.get("log_init_rollout_figures", False))
+        log_persistence = bool(cfg.get("log_persistence_baseline", False))
 
         rng, init_rng = jax.random.split(rng)
         stacked_params, single_params, frozen_params, scan_map, _ = self._init_members(
@@ -1377,9 +1385,11 @@ class EnsembleMLP(EnsembleDynamics):
                 "val": _mean_curve_list(init_val_curve),
             }
             train_baselines = _traj_baseline_curves(
-                init_train_windows, base_obs_mean, base_reward_mean
+                init_train_windows, base_obs_mean, base_reward_mean, log_persistence
             )
-            val_baselines = _traj_baseline_curves(init_windows, base_obs_mean, base_reward_mean)
+            val_baselines = _traj_baseline_curves(
+                init_windows, base_obs_mean, base_reward_mean, log_persistence
+            )
             metrics = dict(
                 val_traj_mse=float(tj_pm.mean()),
                 val_traj_mse_elite=float(jnp.sort(tj_pm)[:num_elites].mean()),
@@ -1487,10 +1497,10 @@ class EnsembleMLP(EnsembleDynamics):
             train_curves = {"init": init_curves["train"], "final": _mean_curve_list(train_curve)}
             val_curves = {"init": init_curves["val"], "final": _mean_curve_list(curve)}
             train_baselines = _traj_baseline_curves(
-                final_train_windows, base_obs_mean, base_reward_mean
+                final_train_windows, base_obs_mean, base_reward_mean, log_persistence
             )
             val_baselines = _traj_baseline_curves(
-                final_val_windows, base_obs_mean, base_reward_mean
+                final_val_windows, base_obs_mean, base_reward_mean, log_persistence
             )
             metrics = {
                 "train_traj_mse_curve": train_curves,
@@ -1551,17 +1561,22 @@ def _masked_feature_stats(windows: TrajectoryWindows) -> tuple[jax.Array, jax.Ar
 
 
 def _traj_baseline_curves(
-    windows: TrajectoryWindows, obs_mean: jax.Array, reward_mean: jax.Array
+    windows: TrajectoryWindows,
+    obs_mean: jax.Array,
+    reward_mean: jax.Array,
+    include_persistence: bool = True,
 ) -> dict[str, list[float]]:
     """Trivial-predictor open-loop rollout MSE curves (raw units), matching the masking and
     per-feature averaging of ``EnsembleMLP._per_member_traj_mse``.
 
-    Returns ``{"mean_state": [T], "persistence": [T]}`` — both pure functions of the data
-    (no model), so they ground the model curves:
+    Always returns ``{"mean_state": [T]}`` and, when ``include_persistence``, also
+    ``"persistence": [T]`` — pure functions of the data (no model) that ground the model curves:
       ``mean_state``  — predict the constant ``[obs_mean, reward_mean]`` at every step (the
                         ceiling: a model reaching this line is no better than ignoring its input).
       ``persistence`` — open-loop zero-delta: predict ``start_obs`` every step (reward
-                        ``reward_mean``); grows with horizon, the tighter bar to beat.
+                        ``reward_mean``). On slow dynamics it is the tighter bar to beat; on
+                        oscillatory dynamics it overshoots ``mean_state`` (hump-shaped), so it is
+                        opt-in to avoid inflating the panel's y-range when it is not binding.
     """
     target = jnp.concatenate(
         [windows.target_obs, windows.target_reward[..., None]], axis=-1
@@ -1569,21 +1584,23 @@ def _traj_baseline_curves(
     reward_mean = jnp.atleast_1d(reward_mean)
     const_mean = jnp.concatenate([obs_mean, reward_mean])  # (D,)
     se_mean = jnp.mean((const_mean[None, None, :] - target) ** 2, axis=-1)  # (W, T)
-    pers_pred = jnp.concatenate(
-        [
-            jnp.broadcast_to(windows.start_obs[:, None, :], windows.target_obs.shape),
-            jnp.broadcast_to(reward_mean, windows.target_reward.shape + (1,)),
-        ],
-        axis=-1,
-    )  # (W, T, D)
-    se_pers = jnp.mean((pers_pred - target) ** 2, axis=-1)  # (W, T)
     denom = jnp.maximum(windows.mask.sum(axis=0), 1.0)  # (T,)
-    mean_state = (se_mean * windows.mask).sum(axis=0) / denom
-    persistence = (se_pers * windows.mask).sum(axis=0) / denom
-    return {
-        "mean_state": [float(v) for v in mean_state],
-        "persistence": [float(v) for v in persistence],
+    curves = {
+        "mean_state": [float(v) for v in (se_mean * windows.mask).sum(axis=0) / denom],
     }
+    if include_persistence:
+        pers_pred = jnp.concatenate(
+            [
+                jnp.broadcast_to(windows.start_obs[:, None, :], windows.target_obs.shape),
+                jnp.broadcast_to(reward_mean, windows.target_reward.shape + (1,)),
+            ],
+            axis=-1,
+        )  # (W, T, D)
+        se_pers = jnp.mean((pers_pred - target) ** 2, axis=-1)  # (W, T)
+        curves["persistence"] = [
+            float(v) for v in (se_pers * windows.mask).sum(axis=0) / denom
+        ]
+    return curves
 
 
 def _normalized_curve_dict(
@@ -1602,7 +1619,8 @@ def _normalized_curve_dict(
         return [float(v) for v in c / safe[: c.shape[0]]]
 
     out = {k: _norm(v) for k, v in model_curves.items()}
-    out["persistence"] = _norm(baselines["persistence"])
+    if "persistence" in baselines:
+        out["persistence"] = _norm(baselines["persistence"])
     out["mean_state"] = [1.0] * int(ms.shape[0])
     return out
 

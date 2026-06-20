@@ -61,8 +61,11 @@ def run(cfg: DictConfig, logger: Logger) -> None:
         compute_grounding = getattr(world_model, "compute_traj_grounding", None)
         if compute_grounding is not None:
             episodes, _ = load_episodes(cfg.dataset.name)
+            include_persistence = bool(
+                cfg.get("wm_eval", {}).get("log_persistence_baseline", False)
+            )
             traj_mse, traj_mse_elite, curve, nmse, figures = compute_grounding(
-                episodes, traj_horizon, info.dataset_id
+                episodes, traj_horizon, info.dataset_id, include_persistence
             )
             traj_kwargs = dict(
                 traj_mse=float(traj_mse),
