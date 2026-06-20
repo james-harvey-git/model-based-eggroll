@@ -249,6 +249,13 @@ def main(cfg: DictConfig) -> None:
                 f"the world model with dataset={cfg.dataset.name.split('/')[-2]}."
             )
         wm_group = ckpt["wm_group"]
+        # Replace cfg.world_model with the checkpoint's recorded world_model_cfg so
+        # Logger auto-naming and auto-tagging reflect the trained model rather than
+        # the Hydra default (which is eggroll). For a two-phase pipeline this is the
+        # Phase-2 fine-tune config, so the policy run inherits the Phase-2 trainer
+        # (e.g. bptt_trajectory) where one exists, and the single-phase trainer
+        # (e.g. backprop) otherwise. Mirrors the wm_eval stage below.
+        OmegaConf.update(cfg, "world_model", ckpt["world_model_cfg"], force_add=True)
     elif stage == "eval":
         resolved_wm_ckpt, policy_dir, policy_ckpt, wm_group = _resolve_eval_inputs(
             base_checkpoint_dir,

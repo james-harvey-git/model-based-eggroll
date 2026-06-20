@@ -1,5 +1,5 @@
 _target_: mbrl.world_models.ensemble_mlp.EnsembleMLP
-trainer: eggroll_trajectory
+trainer: bptt_trajectory
 
 # Architecture must match the Phase-1 checkpoint being fine-tuned. In a combined
 # pipeline (world_model.finetune=true) experiments/world_model.py overrides these to
@@ -12,8 +12,9 @@ init_scheme: eggroll
 backbone: mlp                      # mlp | residual_mlp
 max_logvar_init: 0.5
 min_logvar_init: -10.0
-# Must match the Phase-1 checkpoint (the head shape differs). Drops the log-variance head
-# (deterministic dynamics): training/fitness become pure MSE; uncertainty is epistemic only.
+# true -> pure-MSE rollout objective (project default); false -> full Gaussian-NLL
+# objective (precision-weighted MSE + logvar term + clamp regulariser). Must match the
+# Phase-1 checkpoint (the head shape differs).
 disable_logvar_predictions: true
 
 # Phase-1 checkpoint to fine-tune. Auto-set from the Phase-1 output in a combined
@@ -21,20 +22,27 @@ disable_logvar_predictions: true
 init_checkpoint: null
 reset_optax_state: true           # fresh optimiser for the new (trajectory) objective
 
-num_epochs: 1000000                 # EGGROLL generations (placeholder; tune empirically)
+num_epochs: 100                   # epochs over the trajectory-window set (placeholder; tune)
 horizon: 5                        # rollout length T; ignored if `curriculum` is set
 # Optional in-process horizon curriculum (re-tiles + carries params across stages):
-#   curriculum: [{horizon: 3, num_epochs: 3000}, {horizon: 6, num_epochs: 7000}]
+#   curriculum: [{horizon: 3, num_epochs: 30}, {horizon: 6, num_epochs: 70}]
 curriculum: null
-batch_size: 16                     # trajectory windows per generation (shared across population)
+batch_size: 256                   # trajectory windows per minibatch
+keep_best: true                   # per-member best-by-trajectory-val-MSE snapshot per epoch
 
+# Steelman BPTT toolkit
+optimizer: adamw                  # sgd | adam | adamw
+lr: 1.0e-4                        # 10x below Phase-1's 1e-3: the multi-step unroll yields stiffer grads
+optimizer_kwargs: {eps: 1.0e-5, weight_decay: 2.5e-5}  # carried over from the Phase-1 backprop config
+max_grad_norm: 1.0                # global grad-norm clip (<=0 disables); the first-line stability defence
+remat_scan: true                  # jax.checkpoint the per-window rollout (memory ~O(1) in horizon)
+truncation: 0                     # 0 = full-horizon BPTT; k>0 = TBPTT-k (detach carry every k steps)
+
+# NLL-objective settings (used only when disable_logvar_predictions=false; ignored under MSE)
 logvar_diff_coef: 0.01            # lambda; clamp regulariser added once per rollout
-freeze_logvar_clamp: false        # ablation: hold max/min_logvar at Phase-1 values (no perturb, no update)
-# Diagnostic only: fitness = pure trajectory MSE (mean head), dropping NLL precision
-# weighting + logvar terms. The variance head then drifts on noise; not for production runs.
-use_mse_fitness: false
+freeze_logvar_clamp: false        # ablation: hold max/min_logvar at Phase-1 values (no update)
 
-trajectory_validation_split: 0.2  # episode-level held-out fraction (trajectory val MSE)
+trajectory_validation_split: 0.2  # episode-level held-out fraction (matches eggroll_trajectory)
 val_transition_mse: true          # also log the comparable one-step val MSE (toggle off if slow)
 log_ensemble_disagreement: true   # cross-member std at start/end + every full validation
 # Chunk size for full-set evaluations (val MSE, rollout curves): bounds peak memory.
@@ -43,26 +51,8 @@ eval_chunk_size: 16384
 # with reset_optax_state=false need it).
 save_opt_state: false
 
-log_interval: 500
-full_validation_interval: 5000
-
-eggroll:
-  population_size: 256            # per member; must be even (antithetic +/-sigma pairs)
-  solver: sgd
-  solver_kwargs: {}
-  noise_reuse: 1
-  sigma: 0.01                     # to be swept
-  # Decays sigma to ~5% of its initial value by num_epochs=10000 (0.05 ** (1/10000)).
-  # Recompute by hand if num_epochs changes.
-  sigma_decay_rate: 0.9999994
-  sigma_schedule: exponential     # constant | exponential | cosine | linear
-  sigma_schedule_kwargs: {}
-  lr: 0.01
-  lr_schedule: constant
-  lr_schedule_kwargs: {}
-  use_batched_update: true
-  # No group_size: with the decoupled batch every perturbation sees the same windows,
-  # so grouping has no effect; the noiser is initialised with group_size=0.
+log_interval: 5                   # cadence in epochs
+full_validation_interval: 25      # cadence in epochs
 
 seed: null                        # set from top-level cfg.seed by experiments/world_model.py
 
