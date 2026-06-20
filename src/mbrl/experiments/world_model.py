@@ -125,6 +125,10 @@ def _save_checkpoint(
         "world_model_cfg": OmegaConf.to_container(wm_cfg),
         "wm_group": logger.wm_group,
         "finetune_lineage": lineage,
+        # W&B run identity so wm_eval can append its outputs to this training run.
+        "wandb_run_id": logger.run_id,
+        "wandb_entity": logger.run_entity,
+        "wandb_project": logger.run_project,
     }
     checkpoint = {**common, **world_model.checkpoint_state()}
     if not bool(wm_cfg.get("save_opt_state", True)):

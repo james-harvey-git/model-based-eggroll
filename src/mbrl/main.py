@@ -222,11 +222,48 @@ def _resolve_eval_inputs(
     return resolved_wm_ckpt, policy_dir, policy_ckpt, policy_wm_group
 
 
+def _find_wandb_run_by_group(group: str, entity: str, project: str):
+    """Best-effort lookup of the world-model training run for a checkpoint's W&B group.
+
+    Returns ``(run_id, entity, project)`` or ``(None, None, None)`` to fall back to a new
+    run. Prefers a dedicated ``world_model`` job over a combined ``all`` run, earliest first.
+    """
+    try:
+        import wandb
+
+        runs = list(wandb.Api().runs(f"{entity}/{project}", filters={"group": group}))
+    except Exception as e:  # network/auth/missing project — never block the eval
+        warnings.warn(f"wm_eval: could not query W&B for group '{group}' ({e}); new run.")
+        return (None, None, None)
+    candidates = [r for r in runs if r.job_type in ("world_model", "all")]
+    if not candidates:
+        warnings.warn(f"wm_eval: no training run in W&B group '{group}'; new run.")
+        return (None, None, None)
+    candidates.sort(key=lambda r: (r.job_type != "world_model", r.created_at))
+    return (candidates[0].id, entity, project)
+
+
+def _resolve_wm_eval_run(cfg: DictConfig, ckpt: dict, wm_group: str):
+    """Find the W&B run to append wm_eval outputs to: explicit override, the id recorded
+    in the checkpoint, or a project search by group. ``(None, None, None)`` => new run."""
+    wandb_cfg = cfg.get("wandb", {})
+    default_entity = wandb_cfg.get("entity", "model-based-eggroll")
+    default_project = "model-based-eggroll"
+    entity = ckpt.get("wandb_entity") or default_entity
+    project = ckpt.get("wandb_project") or default_project
+    override = cfg.get("wm_eval", {}).get("wandb_run_id", None)
+    run_id = override or ckpt.get("wandb_run_id")
+    if run_id:
+        return (str(run_id), entity, project)
+    return _find_wandb_run_by_group(wm_group, default_entity, default_project)
+
+
 @hydra.main(version_base=None, config_path="../../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     base_checkpoint_dir = Path(cfg.checkpoint_dir)
     stage = cfg.get("stage", "all")
+    ckpt: dict = {}  # populated by the wm_eval / policy branches that load a checkpoint
 
     if stage in ("world_model", "all"):
         wm_group = make_wm_group(cfg, timestamp)
@@ -295,7 +332,15 @@ def main(cfg: DictConfig) -> None:
             "world_model, policy, eval, wm_eval, all."
         )
 
-    logger = Logger(cfg, wm_group=wm_group, timestamp=timestamp)
+    # For wm_eval, append outputs to the world-model training run that produced the
+    # checkpoint (resume by id), falling back to a fresh run if it can't be located.
+    logger = None
+    if stage == "wm_eval" and bool(cfg.get("wandb", {}).get("enabled", False)):
+        run_id, entity, project = _resolve_wm_eval_run(cfg, ckpt, wm_group)
+        if run_id is not None and entity is not None and project is not None:
+            logger = Logger.resume_run(cfg, run_id, entity, project, wm_group=wm_group)
+    if logger is None:
+        logger = Logger(cfg, wm_group=wm_group, timestamp=timestamp)
     try:
         if stage in ("world_model", "all"):
             experiments.world_model.run(cfg, logger)

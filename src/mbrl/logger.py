@@ -240,6 +240,12 @@ class Logger:
         provenance = _finetune_provenance(cfg)
         self.finetune_lineage: str | None = provenance.get("finetune_lineage")
 
+        # W&B run identity, recorded into checkpoints so a later wm_eval can append its
+        # outputs to the run that trained the model. None when W&B is disabled.
+        self.run_id: str | None = None
+        self.run_entity: str | None = None
+        self.run_project: str | None = None
+
         wandb_cfg = cfg.get("wandb", {})
         self.enabled: bool = wandb_cfg.get("enabled", False)  # type: ignore[union-attr]
         if self.enabled:
@@ -257,6 +263,39 @@ class Logger:
                 config=config_dict,
             )
             _define_step_metrics()
+            self._record_run_identity()
+
+    def _record_run_identity(self) -> None:
+        if wandb.run is not None:
+            self.run_id = wandb.run.id
+            self.run_entity = wandb.run.entity
+            self.run_project = wandb.run.project
+
+    @classmethod
+    def resume_run(
+        cls,
+        cfg: DictConfig,
+        run_id: str,
+        entity: str,
+        project: str,
+        wm_group: str | None = None,
+    ) -> "Logger":
+        """Create a Logger that re-attaches to an existing W&B run and appends to it.
+
+        Used by the wm_eval stage to log its outputs back onto the world-model training
+        run that produced the evaluated checkpoint, rather than spawning a new run. The
+        run's original name/group/config are preserved (we pass only id + resume).
+        """
+        instance = cls.__new__(cls)
+        instance.enabled = True
+        instance.wm_group = wm_group or ""
+        provenance = _finetune_provenance(cfg)
+        instance.finetune_lineage = provenance.get("finetune_lineage")
+        instance.run_id = instance.run_entity = instance.run_project = None
+        wandb.init(project=project, entity=entity, id=run_id, resume="allow")
+        _define_step_metrics()
+        instance._record_run_identity()
+        return instance
 
     @classmethod
     def from_existing_run(cls, cfg: DictConfig, wm_group: str | None = None) -> "Logger":
@@ -272,6 +311,7 @@ class Logger:
         instance.wm_group = wm_group or ""
         provenance = _finetune_provenance(cfg)
         instance.finetune_lineage = provenance.get("finetune_lineage")
+        instance.run_id = instance.run_entity = instance.run_project = None
         if wandb.run is not None:
             # allow_val_change: legend keys (lr, population_size, ...) collide with
             # the flat swept-param keys the sweep agent already set on the run.
@@ -279,6 +319,7 @@ class Logger:
                 {**_legend_fields(cfg), **provenance}, allow_val_change=True
             )
             _define_step_metrics()
+            instance._record_run_identity()
         return instance
 
     def finish(self) -> None:
