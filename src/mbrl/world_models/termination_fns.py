@@ -48,6 +48,16 @@ def termination_fn_walker2d(obs, act, next_obs):
     return done
 
 
+def termination_fn_pen(obs, act, next_obs):
+    assert len(obs.shape) == len(next_obs.shape) == len(act.shape) == 1
+
+    # Adroit pen: obs[24:27] is the pen object position; the episode ends once the pen drops
+    # out of the hand (its height obs[26] falls below 0.075).
+    obj_pos = next_obs[24:27]
+    done = obj_pos[2] < 0.075
+    return done
+
+
 def get_termination_fn(dataset_id: str) -> Callable:
     """Return the termination function for the given Minari dataset ID."""
     if "halfcheetah" in dataset_id:
@@ -56,5 +66,8 @@ def get_termination_fn(dataset_id: str) -> Callable:
         return termination_fn_hopper
     elif "walker2d" in dataset_id:
         return termination_fn_walker2d
+    # Match "pen/" rather than "pen" so we never misfire on invertedpendulum dataset IDs.
+    elif "pen/" in dataset_id:
+        return termination_fn_pen
     else:
         raise ValueError(f"No termination function registered for dataset: {dataset_id}")
