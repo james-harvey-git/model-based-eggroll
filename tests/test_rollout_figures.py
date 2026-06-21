@@ -130,16 +130,23 @@ class TestFigures:
         fig = rf.plot_error_heatmap(np.abs(np.random.randn(5, 4)))
         assert isinstance(fig, Figure)
 
-    def test_phase_portraits_skipped_off_halfcheetah(self):
+    def test_phase_portraits_skipped_for_unregistered_env(self):
         traj = np.zeros((5, 18))
-        assert rf.plot_joint_phase_portraits(traj, traj, "mujoco/hopper/medium-v0") is None
+        assert rf.plot_joint_phase_portraits(traj, traj, "mujoco/ant/medium-v0") is None
 
     def test_phase_portraits_on_halfcheetah(self):
         traj = np.random.randn(5, 18)
         fig = rf.plot_joint_phase_portraits(traj, traj, "mujoco/halfcheetah/medium-v0")
         assert isinstance(fig, Figure)
         drawn = [ax for ax in fig.axes if ax.has_data()]
-        assert len(drawn) == len(rf._HALFCHEETAH_JOINT_PAIRS)
+        assert len(drawn) == len(rf._PHASE_PORTRAIT_LAYOUTS["halfcheetah"])
+
+    def test_phase_portraits_on_hopper(self):
+        traj = np.random.randn(5, 12)  # 11 obs + reward, as build_rollout_figures passes
+        fig = rf.plot_joint_phase_portraits(traj, traj, "mujoco/hopper/medium-v0")
+        assert isinstance(fig, Figure)
+        drawn = [ax for ax in fig.axes if ax.has_data()]
+        assert len(drawn) == len(rf._PHASE_PORTRAIT_LAYOUTS["hopper"])
 
     def test_select_window_indices(self):
         sel = rf.select_window_indices(np.array([0.5, 0.1, 0.9, 0.3]))

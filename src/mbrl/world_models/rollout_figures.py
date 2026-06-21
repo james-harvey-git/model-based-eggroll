@@ -3,8 +3,8 @@
 These ground the aggregate trajectory-MSE curves with a *visual* check of how a predicted
 rollout diverges from the real trajectory: per-feature time-series (does it drift, blow up,
 or stay calibrated within the ensemble spread?), a per-feature normalized-error heatmap
-(which dimensions drive the compounding error, and when), and — for HalfCheetah — genuine
-joint phase portraits (angle vs angular velocity).
+(which dimensions drive the compounding error, and when), and — for envs with a registered
+layout (HalfCheetah, Hopper) — genuine joint phase portraits (angle/height vs velocity).
 
 All functions are pure: they take numpy arrays and return a ``matplotlib.figure.Figure``
 (or ``None`` when the plot does not apply), and never touch W&B or global pyplot state.
@@ -20,21 +20,33 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 import numpy as np
 
-# HalfCheetah observation layout (exclude_current_positions_from_observation=True):
-# obs = qpos[1:] (8) then qvel (9), so a position/angle at obs index i pairs with its
-# velocity at i + 9. The forward position (qpos[0]) is excluded, so qvel[0] (obs[8],
-# forward velocity) has no position counterpart and is left unpaired.
-_HALFCHEETAH_VEL_OFFSET = 9
-# (obs index, velocity obs index, label) for the six actuated joints — the genuine
-# angle-vs-angular-velocity phase planes.
-_HALFCHEETAH_JOINT_PAIRS = [
-    (2, 11, "bthigh"),
-    (3, 12, "bshin"),
-    (4, 13, "bfoot"),
-    (5, 14, "fthigh"),
-    (6, 15, "fshin"),
-    (7, 16, "ffoot"),
-]
+# Per-environment phase-portrait layouts: (position obs index, velocity obs index, label)
+# for the genuine angle/height-vs-velocity planes. Indices follow each env's Gymnasium
+# observation layout with exclude_current_positions_from_observation=True, so the excluded
+# root x leaves the forward velocity (qvel[0]) with no position counterpart, unpaired.
+#
+# HalfCheetah: obs = qpos[1:] (8) then qvel (9); a position at index i pairs with its
+#   velocity at i + 9. Only the six actuated joints are plotted (root z / angle omitted).
+# Hopper: obs = qpos[1:] (5) then qvel (6); a position at index i pairs with its velocity at
+#   i + 6. Height (obs[0]) and torso angle (obs[1]) govern falling/termination, so they are
+#   plotted alongside the three actuated joints (thigh, leg, foot).
+_PHASE_PORTRAIT_LAYOUTS: dict[str, list[tuple[int, int, str]]] = {
+    "halfcheetah": [
+        (2, 11, "bthigh"),
+        (3, 12, "bshin"),
+        (4, 13, "bfoot"),
+        (5, 14, "fthigh"),
+        (6, 15, "fshin"),
+        (7, 16, "ffoot"),
+    ],
+    "hopper": [
+        (0, 6, "height"),
+        (1, 7, "torso ang"),
+        (2, 8, "thigh"),
+        (3, 9, "leg"),
+        (4, 10, "foot"),
+    ],
+}
 
 
 def _feature_labels(n_features: int) -> list[str]:
@@ -115,15 +127,19 @@ def plot_error_heatmap(per_feature_nmse: np.ndarray, title: str = "rollout NMSE"
 def plot_joint_phase_portraits(
     true_traj: np.ndarray, pred_mean: np.ndarray, dataset_id: str, title: str = "phase portraits"
 ) -> Figure | None:
-    """HalfCheetah joint angle-vs-angular-velocity phase portraits for one window.
+    """Angle/height-vs-velocity phase portraits for one window.
 
-    Returns ``None`` (and prints a one-line note) for any non-HalfCheetah dataset, since the
-    obs-index pairing is environment-specific. ``true_traj``/``pred_mean`` are ``(T, D)``.
+    Looks up the env-specific obs-index pairing in ``_PHASE_PORTRAIT_LAYOUTS`` (keyed by a
+    substring of ``dataset_id``). Returns ``None`` (and prints a one-line note) for any dataset
+    without a registered layout, since the pairing is environment-specific.
+    ``true_traj``/``pred_mean`` are ``(T, D)``.
     """
-    if "halfcheetah" not in dataset_id.lower():
-        print(f"rollout_figures: phase portraits skipped (not halfcheetah): {dataset_id}")
+    pairs = next(
+        (p for k, p in _PHASE_PORTRAIT_LAYOUTS.items() if k in dataset_id.lower()), None
+    )
+    if pairs is None:
+        print(f"rollout_figures: phase portraits skipped (no layout for): {dataset_id}")
         return None
-    pairs = _HALFCHEETAH_JOINT_PAIRS
     needed = max(max(a, v) for a, v, _ in pairs)
     if true_traj.shape[1] <= needed:  # obs smaller than the assumed halfcheetah layout
         print(
