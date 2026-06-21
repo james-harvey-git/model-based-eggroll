@@ -865,8 +865,8 @@ class EnsembleMLP(EnsembleDynamics):
         Produces a per-feature normalized-error heatmap (aggregated over all windows), a
         true-vs-predicted time-series for the best / median / worst windows by rollout MSE
         (with the ensemble min/max band), and — for envs with a registered layout (HalfCheetah,
-        Hopper) — joint phase portraits for the representative (median) window. Pure host-side
-        rendering; the caller logs them.
+        Hopper, Adroit pen) — phase portraits for the representative (median) window. Pure
+        host-side rendering; the caller logs them.
         """
         from mbrl.world_models import rollout_figures as rf
 

@@ -4,7 +4,7 @@ These ground the aggregate trajectory-MSE curves with a *visual* check of how a 
 rollout diverges from the real trajectory: per-feature time-series (does it drift, blow up,
 or stay calibrated within the ensemble spread?), a per-feature normalized-error heatmap
 (which dimensions drive the compounding error, and when), and — for envs with a registered
-layout (HalfCheetah, Hopper) — genuine joint phase portraits (angle/height vs velocity).
+layout (HalfCheetah, Hopper, Adroit pen) — genuine phase portraits (position/angle vs velocity).
 
 All functions are pure: they take numpy arrays and return a ``matplotlib.figure.Figure``
 (or ``None`` when the plot does not apply), and never touch W&B or global pyplot state.
@@ -45,6 +45,19 @@ _PHASE_PORTRAIT_LAYOUTS: dict[str, list[tuple[int, int, str]]] = {
         (2, 8, "thigh"),
         (3, 9, "leg"),
         (4, 10, "foot"),
+    ],
+    # Adroit pen: obs = 24 hand-joint positions (no hand velocities observed), then the pen
+    # object — pos obs[24:27], linear vel obs[27:30], angular vel obs[30:33], orientation
+    # obs[33:36]. So the only genuine phase planes are the pen's pos-vs-linear-vel and
+    # orientation-vs-angular-vel; the latter is the task-relevant one (the goal is to reorient
+    # the pen). Keyed on "pen/" (not "pen") so it cannot match invertedpendulum ids.
+    "pen/": [
+        (24, 27, "pen x"),
+        (25, 28, "pen y"),
+        (26, 29, "pen z"),
+        (33, 30, "orien x"),
+        (34, 31, "orien y"),
+        (35, 32, "orien z"),
     ],
 }
 

@@ -148,6 +148,19 @@ class TestFigures:
         drawn = [ax for ax in fig.axes if ax.has_data()]
         assert len(drawn) == len(rf._PHASE_PORTRAIT_LAYOUTS["hopper"])
 
+    def test_phase_portraits_on_pen(self):
+        traj = np.random.randn(5, 46)  # 45 obs + reward, as build_rollout_figures passes
+        fig = rf.plot_joint_phase_portraits(traj, traj, "D4RL/pen/cloned-v2")
+        assert isinstance(fig, Figure)
+        drawn = [ax for ax in fig.axes if ax.has_data()]
+        assert len(drawn) == len(rf._PHASE_PORTRAIT_LAYOUTS["pen/"])
+
+    def test_pen_key_does_not_match_pendulum(self):
+        # "pen/" must not collide with invertedpendulum ids, which also contain "pen".
+        traj = np.random.randn(5, 46)
+        pend_id = "mujoco/invertedpendulum/medium-v0"
+        assert rf.plot_joint_phase_portraits(traj, traj, pend_id) is None
+
     def test_select_window_indices(self):
         sel = rf.select_window_indices(np.array([0.5, 0.1, 0.9, 0.3]))
         assert sel["best"] == 1 and sel["worst"] == 2
