@@ -163,10 +163,21 @@ def _train_dynamics(
         val_mse_per_member = val_losses.mean(axis=0)  # (num_ensemble,)
         elite_idxs = val_mse_per_member.argsort()[:num_elites]
 
+        # TEMP (diagnostic, revert after): MOPO uncertainty-penalty scale over the val set,
+        # restricted to the current elites, matching EnsembleMLP._val_uncertainty_penalties:
+        #   epistemic = mean_t ||std_elites(mean)||_2 ; aleatoric = mean_t max_elite ||std||_2.
+        v_mean, v_logvar = train_state.apply_fn(train_state.params, val_inputs)  # (E, N, D)
+        elite_mean = v_mean[elite_idxs]  # (num_elites, N, D)
+        elite_std = jnp.exp(0.5 * v_logvar[elite_idxs])  # (num_elites, N, D)
+        mopo_epistemic = jnp.mean(jnp.linalg.norm(jnp.std(elite_mean, axis=0), axis=-1))
+        mopo_aleatoric = jnp.mean(jnp.max(jnp.linalg.norm(elite_std, axis=-1), axis=0))
+
         if log_fn is not None:
             _log_fn = log_fn
 
-            def _log_callback(epoch_i, train_loss_i, val_mse_i, val_mse_elite_i) -> None:
+            def _log_callback(
+                epoch_i, train_loss_i, val_mse_i, val_mse_elite_i, epi_i, ale_i
+            ) -> None:
                 epoch_py = int(epoch_i) + 1
                 update_step = epoch_py * batches_per_epoch
                 transitions_seen, forward_evals = _mle_work_counters(
@@ -183,6 +194,8 @@ def _train_dynamics(
                     forward_evals,
                     epoch=epoch_py,
                     val_mse_elite=float(val_mse_elite_i),
+                    val_mopo_penalty_epistemic=float(epi_i),
+                    val_mopo_penalty_aleatoric=float(ale_i),
                 )
 
             jax.debug.callback(
@@ -191,6 +204,8 @@ def _train_dynamics(
                 batch_losses.mean(),
                 val_mse_per_member.mean(),
                 val_mse_per_member[elite_idxs].mean(),
+                mopo_epistemic,
+                mopo_aleatoric,
             )
 
         return rng, train_state, elite_idxs
