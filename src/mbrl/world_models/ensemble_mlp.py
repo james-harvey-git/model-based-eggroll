@@ -527,13 +527,20 @@ class EnsembleMLP(EnsembleDynamics):
                     in_axes=(0, 0),
                 )(obs_b, action_b)
 
-            means, logvars, maxlv, minlv = jax.vmap(per_member)(params)  # (N,B,D),(N,D)
+            # means/logvars/maxlv/minlv: (N, B, D). The clamp bounds are per-member
+            # Parameters, so maxlv/minlv are constant along the batch axis (broadcast by
+            # the inner vmap).
+            means, logvars, maxlv, minlv = jax.vmap(per_member)(params)
             if not self.predicts_logvar:  # deterministic: plain MSE, no variance/clamp terms
                 return ((means - target_b[None]) ** 2).sum(0).mean()
             assert logvars is not None and maxlv is not None and minlv is not None
             mse_loss = (((means - target_b[None]) ** 2) * jnp.exp(-logvars)).sum(0).mean()
             var_loss = logvars.sum(0).mean()
-            logvar_diff = (maxlv - minlv).sum()
+            # Dedupe the batch axis ([: , 0]): the clamp regulariser is summed over members
+            # and features only. Summing the (constant) batch axis too scales it by
+            # batch_size, which overwhelms var_loss and drives min_logvar — and the predicted
+            # std — to blow up.
+            logvar_diff = (maxlv[:, 0] - minlv[:, 0]).sum()
             return mse_loss + var_loss + coef * logvar_diff
 
         def _train_step(carry, batch):
