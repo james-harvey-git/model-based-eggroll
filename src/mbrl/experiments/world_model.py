@@ -61,6 +61,8 @@ def _make_onestep_log_fn(logger: Logger, start_time: float):
         lr: float | None = None,
         sigma: float | None = None,
         fitness_std: float | None = None,
+        val_mopo_penalty_epistemic: float | None = None,
+        val_mopo_penalty_aleatoric: float | None = None,
     ) -> None:
         metrics: dict[str, float] = {}
         train_loss_f = float(train_loss)
@@ -77,6 +79,10 @@ def _make_onestep_log_fn(logger: Logger, start_time: float):
             metrics["sigma"] = float(sigma)
         if fitness_std is not None and math.isfinite(fitness_std):
             metrics["fitness_std"] = float(fitness_std)
+        if val_mopo_penalty_epistemic is not None and math.isfinite(val_mopo_penalty_epistemic):
+            metrics["val_mopo_penalty_epistemic"] = float(val_mopo_penalty_epistemic)
+        if val_mopo_penalty_aleatoric is not None and math.isfinite(val_mopo_penalty_aleatoric):
+            metrics["val_mopo_penalty_aleatoric"] = float(val_mopo_penalty_aleatoric)
         if epoch is not None:
             metrics["epoch"] = float(epoch)
         metrics["transitions_seen"] = float(transitions_seen)

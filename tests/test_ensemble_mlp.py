@@ -821,6 +821,56 @@ def _train_bptt_traj(cfg, dataset, episodes, key, log_fn=None):
     return model
 
 
+class TestMopoPenaltyScale:
+    """MOPO uncertainty-penalty scale logging over the validation set (elite members)."""
+
+    def test_penalties_with_logvar_head(self, backprop_model, synthetic_dataset):
+        pen = backprop_model._val_uncertainty_penalties(
+            backprop_model._params,
+            synthetic_dataset.obs[:8], synthetic_dataset.action[:8],
+            backprop_model._elite_idxs,
+        )
+        assert set(pen) == {"val_mopo_penalty_epistemic", "val_mopo_penalty_aleatoric"}
+        assert all(np.isfinite(float(v)) and float(v) >= 0 for v in pen.values())
+
+    def test_penalties_without_logvar_head(self, synthetic_dataset):
+        model = _train(_backprop_cfg(disable_logvar_predictions=True), synthetic_dataset, 0)
+        pen = model._val_uncertainty_penalties(
+            model._params, synthetic_dataset.obs[:8], synthetic_dataset.action[:8],
+            model._elite_idxs,
+        )
+        assert set(pen) == {"val_mopo_penalty_epistemic"}  # no aleatoric without a logvar head
+
+    def test_restricts_to_elites(self, backprop_model, synthetic_dataset):
+        """Restricting to a single elite collapses the cross-member (epistemic) std to 0,
+        confirming the penalty is computed over the passed elite indices, not all members."""
+        pen = backprop_model._val_uncertainty_penalties(
+            backprop_model._params, synthetic_dataset.obs[:8], synthetic_dataset.action[:8],
+            backprop_model._elite_idxs[:1],
+        )
+        assert float(pen["val_mopo_penalty_epistemic"]) == pytest.approx(0.0, abs=1e-6)
+
+    def test_logged_when_enabled(self, backprop_model, synthetic_dataset, tmp_path):
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt), log_mopo_penalty_scale=True),
+            synthetic_dataset, _toy_episodes(), 0, log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        keys = set().union(*(r.keys() for r in rows))
+        assert {"val_mopo_penalty_epistemic", "val_mopo_penalty_aleatoric"} <= keys
+
+    def test_off_by_default(self, backprop_model, synthetic_dataset, tmp_path):
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt)), synthetic_dataset, _toy_episodes(), 0,
+            log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        keys = set().union(*(r.keys() for r in rows))
+        assert not any("mopo_penalty" in k for k in keys)
+
+
 class TestEnsembleMLPBpttTrajectory:
     def test_train_and_infer(self, backprop_model, synthetic_dataset, tmp_path):
         ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)

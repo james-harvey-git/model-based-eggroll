@@ -34,6 +34,10 @@ disable_logvar_predictions: true
 # so val loss can be tracked sub-epoch against transitions seen.
 log_interval: 100
 full_validation_interval: 500
+# Log the scale of MOPO's uncertainty penalty over the validation set every full validation
+# (epistemic always; aleatoric when a logvar head exists), to calibrate penalty_coeff. Off by
+# default (adds one elite forward pass per validation).
+log_mopo_penalty_scale: false
 
 init_checkpoint: null             # path to an EnsembleMLP checkpoint to fine-tune from
 reset_optax_state: true          # carry the optimiser state across fine-tuning unless true

@@ -341,6 +341,46 @@ class EnsembleMLP(EnsembleDynamics):
         per_member = ((means - targets[None]) ** 2).mean(axis=(1, 2))
         return per_member, jnp.mean(jnp.std(means, axis=0))
 
+    def _val_uncertainty_penalties(self, params, obs, action, elite_idxs) -> dict:
+        """Mean over the transition set of MOPO's per-transition uncertainty penalties,
+        for calibrating ``penalty_coeff`` (see ``policy_optimizers/mopo.py``):
+
+        - ``val_mopo_penalty_epistemic``: ``mean_t ‖std_elites(mean)‖₂`` — the L2 norm of the
+          cross-member std of the predicted means (the epistemic penalty, always available).
+        - ``val_mopo_penalty_aleatoric``: ``mean_t max_elite ‖std_elite‖₂`` — the max over
+          members of the L2 norm of each member's predicted std ``exp(½·logvar)`` (the classic
+          MOPO penalty; only emitted when the model has a log-variance head).
+
+        Computed over the ``elite_idxs`` members only, matching MOPO's ``predict_ensemble``
+        (which uses the elites). During training the elites are those selected by the current
+        params' validation metric, so this tracks the penalty scale MOPO would see.
+        """
+        elite_params = jax.tree.map(lambda x: x[elite_idxs], params)
+        if self.predicts_logvar:
+            means, logvars = jax.lax.map(
+                lambda oa: jax.vmap(
+                    lambda pm: self._member_meanlogvar(pm, oa[0], oa[1])
+                )(elite_params),
+                (obs, action),
+                batch_size=self._eval_chunk_size,
+            )  # each (N, num_elites, D)
+            means = jnp.swapaxes(means, 0, 1)  # (num_elites, N, D)
+            stds = jnp.exp(0.5 * jnp.swapaxes(logvars, 0, 1))  # (num_elites, N, D)
+            return {
+                "val_mopo_penalty_epistemic": jnp.mean(
+                    jnp.linalg.norm(jnp.std(means, axis=0), axis=-1)
+                ),
+                "val_mopo_penalty_aleatoric": jnp.mean(
+                    jnp.max(jnp.linalg.norm(stds, axis=-1), axis=0)
+                ),
+            }
+        means = self._ensemble_means(elite_params, obs, action)  # (num_elites, N, D)
+        return {
+            "val_mopo_penalty_epistemic": jnp.mean(
+                jnp.linalg.norm(jnp.std(means, axis=0), axis=-1)
+            )
+        }
+
     def compute_val_mse(self, dataset: Transition) -> jax.Array:
         """Elite-mean MSE over *dataset* (matches the training-time ``val_mse_elite``)."""
         assert self._params is not None and self._elite_idxs is not None
@@ -474,6 +514,7 @@ class EnsembleMLP(EnsembleDynamics):
         n_val = val_obs.shape[0]
         num_elites = self.num_elites
         lr_value = float(cfg.lr)  # constant backprop step size, logged for trainer parity
+        log_mopo_penalty = bool(cfg.get("log_mopo_penalty_scale", False))
 
         def _loss_fn(params, obs_b, action_b, target_b):
             def per_member(pm):
@@ -507,6 +548,7 @@ class EnsembleMLP(EnsembleDynamics):
                     log_fn, params, step, loss, val_obs, val_action, val_targets,
                     self._per_member_val_mse, n_ens, num_elites, batch_size, n_val,
                     log_interval, full_validation_interval, lr_value,
+                    self._val_uncertainty_penalties if log_mopo_penalty else None,
                 )
             return (params, opt_state, step), loss
 
@@ -569,6 +611,7 @@ class EnsembleMLP(EnsembleDynamics):
         full_validation_interval = int(cfg.get("full_validation_interval", cfg.log_interval))
         log_interval = int(cfg.log_interval)
         assert log_interval > 0 and full_validation_interval > 0
+        log_mopo_penalty = bool(cfg.get("log_mopo_penalty_scale", False))
 
         reset_optax = bool(cfg.get("reset_optax_state", False))
         lr_schedule_name = str(cfg.eggroll.get("lr_schedule", "constant"))
@@ -698,6 +741,7 @@ class EnsembleMLP(EnsembleDynamics):
                     self._per_member_val_mse, val_obs, val_action, val_targets,
                     lr_schedule, sigma, n_prompts, pop, n_val, n_ens, num_elites,
                     log_interval, full_validation_interval, step_offset,
+                    self._val_uncertainty_penalties if log_mopo_penalty else None,
                 )
             return rng, params, opt_state
 
@@ -927,6 +971,7 @@ class EnsembleMLP(EnsembleDynamics):
         use_mse = bool(cfg.get("use_mse_fitness", False)) or not self.predicts_logvar
         log_transition = bool(cfg.get("val_transition_mse", True))
         log_disagreement = bool(cfg.get("log_ensemble_disagreement", False))
+        log_mopo_penalty = bool(cfg.get("log_mopo_penalty_scale", False))
         n_ens = self.num_ensemble
         num_elites = self.num_elites
 
@@ -1162,6 +1207,7 @@ class EnsembleMLP(EnsembleDynamics):
                         log_transition, log_disagreement,
                         lr_value, sigma, num_elites, batch_size, horizon, pop, n_ens,
                         log_interval, full_validation_interval, step_offset,
+                        self._val_uncertainty_penalties if log_mopo_penalty else None,
                     )
                 return rng, params, opt_state
 
@@ -1241,6 +1287,7 @@ class EnsembleMLP(EnsembleDynamics):
         freeze_clamp = bool(cfg.get("freeze_logvar_clamp", False)) and self.predicts_logvar
         log_transition = bool(cfg.get("val_transition_mse", True))
         log_disagreement = bool(cfg.get("log_ensemble_disagreement", False))
+        log_mopo_penalty = bool(cfg.get("log_mopo_penalty_scale", False))
         keep_best = bool(cfg.get("keep_best", True))
         max_grad_norm = float(cfg.get("max_grad_norm", 0.0))  # <=0 disables clipping
         remat_scan = bool(cfg.get("remat_scan", True))
@@ -1466,6 +1513,7 @@ class EnsembleMLP(EnsembleDynamics):
                         log_transition, log_disagreement,
                         float(cfg.lr), num_elites, batch_size, horizon, n_ens,
                         batches_per_epoch, log_interval, full_validation_interval, step_offset,
+                        self._val_uncertainty_penalties if log_mopo_penalty else None,
                     )
                 return params, opt_state, best_params, best_val
 
@@ -1669,7 +1717,7 @@ def _resolve_sigma_schedule(eg_cfg) -> optax.Schedule:
 def _emit_backprop_log(
     log_fn, params, step, train_loss, val_obs, val_action, val_targets,
     per_member_val_mse, n_ens, num_elites, batch_size, n_val,
-    log_interval, full_validation_interval, lr,
+    log_interval, full_validation_interval, lr, uncertainty_fn=None,
 ) -> None:
     should_validate = (step % full_validation_interval == 0)
     should_log = (step % log_interval == 0) | should_validate
@@ -1684,18 +1732,24 @@ def _emit_backprop_log(
         s = int(step_i)
         log_fn(s, float(loss_i), float("nan"), _ts(s), _fe(s), lr=lr)
 
-    def _val_cb(step_i, loss_i, val_mse_i, val_elite_i) -> None:
+    def _val_cb(step_i, loss_i, val_mse_i, val_elite_i, extra) -> None:
         s = int(step_i)
         log_fn(
             s, float(loss_i), float(val_mse_i), _ts(s), _fe(s),
             lr=lr, val_mse_elite=float(val_elite_i),
+            **{k: float(v) for k, v in extra.items()},
         )
 
     def _with_val(_):
         per_member = per_member_val_mse(params, val_obs, val_action, val_targets)
+        extra = (
+            uncertainty_fn(params, val_obs, val_action, jnp.argsort(per_member)[:num_elites])
+            if uncertainty_fn is not None
+            else {}
+        )
         jax.debug.callback(
             _val_cb, step, train_loss, per_member.mean(),
-            jnp.sort(per_member)[:num_elites].mean(),
+            jnp.sort(per_member)[:num_elites].mean(), extra,
         )
 
     def _train_only(_):
@@ -1713,7 +1767,7 @@ def _emit_eggroll_log(
     log_fn, params, epoch, train_loss, fitness_std,
     per_member_val_mse, val_obs, val_action, val_targets,
     lr_schedule, sigma, n_prompts, pop, n_val, n_ens, num_elites,
-    log_interval, full_validation_interval, step_offset,
+    log_interval, full_validation_interval, step_offset, uncertainty_fn=None,
 ) -> None:
     step = epoch + 1
     should_validate = (epoch == 0) | (step % full_validation_interval == 0)
@@ -1732,20 +1786,26 @@ def _emit_eggroll_log(
             lr=float(lr_i), sigma=float(sigma_i), fitness_std=float(std_i),
         )
 
-    def _val_cb(step_i, loss_i, std_i, val_mse_i, val_elite_i, lr_i, sigma_i) -> None:
+    def _val_cb(step_i, loss_i, std_i, val_mse_i, val_elite_i, lr_i, sigma_i, extra) -> None:
         s = int(step_i)
         t, f = _eggroll_work_counters(s, n_prompts, pop_n, nval_n, full_validation_interval)
         log_fn(
             s + step_offset, float(loss_i), float(val_mse_i), t, f,
             lr=float(lr_i), sigma=float(sigma_i), val_mse_elite=float(val_elite_i),
             fitness_std=float(std_i),
+            **{k: float(v) for k, v in extra.items()},
         )
 
     def _with_val(_):
         per_member = per_member_val_mse(params, val_obs, val_action, val_targets)
+        extra = (
+            uncertainty_fn(params, val_obs, val_action, jnp.argsort(per_member)[:num_elites])
+            if uncertainty_fn is not None
+            else {}
+        )
         jax.debug.callback(
             _val_cb, step, train_loss, fitness_std, per_member.mean(),
-            jnp.sort(per_member)[:num_elites].mean(), lr_value, sigma,
+            jnp.sort(per_member)[:num_elites].mean(), lr_value, sigma, extra,
         )
 
     def _train_only(_):
@@ -1765,7 +1825,7 @@ def _emit_traj_log(
     val_mse_and_disagreement, tv_obs, tv_action, tv_targets,
     log_transition, log_disagreement,
     lr_value, sigma, num_elites, batch_size, horizon, pop, n_ens,
-    log_interval, full_validation_interval, step_offset,
+    log_interval, full_validation_interval, step_offset, uncertainty_fn=None,
 ) -> None:
     """Phase-2 logging: training NLL + MSE-only validation, on the ``world_model_ft`` axis.
 
@@ -1815,6 +1875,11 @@ def _emit_traj_log(
                 vals["val_transition_mse_elite"] = jnp.sort(tr_pm)[:num_elites].mean()
             if log_disagreement:
                 vals["ensemble_disagreement"] = disagreement
+        if uncertainty_fn is not None:
+            # Elites are selected by trajectory val MSE (as at final selection), matching MOPO.
+            vals.update(
+                uncertainty_fn(params, tv_obs, tv_action, jnp.argsort(tj_pm)[:num_elites])
+            )
         jax.debug.callback(_cb, step, vals)
 
     def _train_only(_):
@@ -1835,6 +1900,7 @@ def _emit_bptt_traj_log(
     log_transition, log_disagreement,
     lr_value, num_elites, batch_size, horizon, n_ens,
     batches_per_epoch, log_interval, full_validation_interval, step_offset,
+    uncertainty_fn=None,
 ) -> None:
     """Phase-2 BPTT logging: training loss + MSE-only validation, ``world_model_ft`` axis.
 
@@ -1884,6 +1950,11 @@ def _emit_bptt_traj_log(
                 vals["val_transition_mse_elite"] = jnp.sort(tr_pm)[:num_elites].mean()
             if log_disagreement:
                 vals["ensemble_disagreement"] = disagreement
+        if uncertainty_fn is not None:
+            # Elites are selected by trajectory val MSE (as at final selection), matching MOPO.
+            vals.update(
+                uncertainty_fn(params, tv_obs, tv_action, jnp.argsort(tj_pm)[:num_elites])
+            )
         jax.debug.callback(_cb, step, vals)
 
     def _train_only(_):
