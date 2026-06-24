@@ -61,6 +61,8 @@ def _make_onestep_log_fn(logger: Logger, start_time: float):
         lr: float | None = None,
         sigma: float | None = None,
         fitness_std: float | None = None,
+        val_mopo_penalty_epistemic: float | None = None,
+        val_mopo_penalty_aleatoric: float | None = None,
     ) -> None:
         metrics: dict[str, float] = {}
         train_loss_f = float(train_loss)
@@ -77,6 +79,10 @@ def _make_onestep_log_fn(logger: Logger, start_time: float):
             metrics["sigma"] = float(sigma)
         if fitness_std is not None and math.isfinite(fitness_std):
             metrics["fitness_std"] = float(fitness_std)
+        if val_mopo_penalty_epistemic is not None and math.isfinite(val_mopo_penalty_epistemic):
+            metrics["val_mopo_penalty_epistemic"] = float(val_mopo_penalty_epistemic)
+        if val_mopo_penalty_aleatoric is not None and math.isfinite(val_mopo_penalty_aleatoric):
+            metrics["val_mopo_penalty_aleatoric"] = float(val_mopo_penalty_aleatoric)
         if epoch is not None:
             metrics["epoch"] = float(epoch)
         metrics["transitions_seen"] = float(transitions_seen)
@@ -93,10 +99,15 @@ def _make_traj_log_fn(logger: Logger, start_time: float):
     Reserved keys containing ``_curve`` are routed to line-chart panels rather than
     logged as scalars: a dict value (series name -> per-step list, e.g.
     ``{train,val}_traj_mse_curve`` each overlaying init vs final) becomes one
-    line_series panel; a plain list becomes a single-line panel.
+    line_series panel; a plain list becomes a single-line panel. The reserved
+    ``rollout_figures`` key (a dict name -> matplotlib Figure) is logged as images.
     """
 
     def log_fn(generation: int, **metrics) -> None:
+        figures = metrics.pop("rollout_figures", None)
+        if figures is not None:
+            for name, fig in figures.items():
+                logger.log_world_model_finetune_image(name, fig, int(generation))
         for key in [k for k in metrics if "_curve" in k]:
             value = metrics.pop(key)
             if isinstance(value, dict):
@@ -120,6 +131,10 @@ def _save_checkpoint(
         "world_model_cfg": OmegaConf.to_container(wm_cfg),
         "wm_group": logger.wm_group,
         "finetune_lineage": lineage,
+        # W&B run identity so wm_eval can append its outputs to this training run.
+        "wandb_run_id": logger.run_id,
+        "wandb_entity": logger.run_entity,
+        "wandb_project": logger.run_project,
     }
     checkpoint = {**common, **world_model.checkpoint_state()}
     if not bool(wm_cfg.get("save_opt_state", True)):

@@ -24,6 +24,10 @@ min_logvar_init: -10.0
 disable_logvar_predictions: true
 log_interval: 500
 full_validation_interval: 5000
+# Log the scale of MOPO's uncertainty penalty over the validation set every full validation
+# (epistemic always; aleatoric when a logvar head exists), to calibrate penalty_coeff. Off by
+# default (adds one elite forward pass per validation).
+log_mopo_penalty_scale: false
 
 # false: each member gets independent perturbation directions (init-orthogonal
 # diversity backprop lacks). true: one perturbation population broadcast across

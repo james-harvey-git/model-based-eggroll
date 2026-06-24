@@ -30,3 +30,9 @@ wm_eval:
   # stage=wm_eval: also report open-loop rollout MSE (+ per-step curve) at this horizon.
   # 0 disables; only world-model classes with compute_traj_mse (EnsembleMLP) support it.
   traj_horizon: 5
+  # Overlay the persistence (open-loop zero-delta) baseline on the normalized panel. Off by
+  # default; enable for slow-dynamics datasets where it is the binding bar to beat.
+  log_persistence_baseline: false
+  # Append outputs to this existing W&B run id instead of resolving from the checkpoint /
+  # group search. null = auto (checkpoint-recorded id, else search by group, else new run).
+  wandb_run_id: null

@@ -15,6 +15,7 @@ dependencies = [
     "optax>=0.2.8",
     "flax>=0.12.6",
     "distrax>=0.1.7",
+    "matplotlib>=3.11.0",
 ]
 
 [dependency-groups]

@@ -23,6 +23,7 @@ from typing import NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from omegaconf import DictConfig, OmegaConf
 import optax
 
@@ -340,6 +341,46 @@ class EnsembleMLP(EnsembleDynamics):
         per_member = ((means - targets[None]) ** 2).mean(axis=(1, 2))
         return per_member, jnp.mean(jnp.std(means, axis=0))
 
+    def _val_uncertainty_penalties(self, params, obs, action, elite_idxs) -> dict:
+        """Mean over the transition set of MOPO's per-transition uncertainty penalties,
+        for calibrating ``penalty_coeff`` (see ``policy_optimizers/mopo.py``):
+
+        - ``val_mopo_penalty_epistemic``: ``mean_t ‖std_elites(mean)‖₂`` — the L2 norm of the
+          cross-member std of the predicted means (the epistemic penalty, always available).
+        - ``val_mopo_penalty_aleatoric``: ``mean_t max_elite ‖std_elite‖₂`` — the max over
+          members of the L2 norm of each member's predicted std ``exp(½·logvar)`` (the classic
+          MOPO penalty; only emitted when the model has a log-variance head).
+
+        Computed over the ``elite_idxs`` members only, matching MOPO's ``predict_ensemble``
+        (which uses the elites). During training the elites are those selected by the current
+        params' validation metric, so this tracks the penalty scale MOPO would see.
+        """
+        elite_params = jax.tree.map(lambda x: x[elite_idxs], params)
+        if self.predicts_logvar:
+            means, logvars = jax.lax.map(
+                lambda oa: jax.vmap(
+                    lambda pm: self._member_meanlogvar(pm, oa[0], oa[1])
+                )(elite_params),
+                (obs, action),
+                batch_size=self._eval_chunk_size,
+            )  # each (N, num_elites, D)
+            means = jnp.swapaxes(means, 0, 1)  # (num_elites, N, D)
+            stds = jnp.exp(0.5 * jnp.swapaxes(logvars, 0, 1))  # (num_elites, N, D)
+            return {
+                "val_mopo_penalty_epistemic": jnp.mean(
+                    jnp.linalg.norm(jnp.std(means, axis=0), axis=-1)
+                ),
+                "val_mopo_penalty_aleatoric": jnp.mean(
+                    jnp.max(jnp.linalg.norm(stds, axis=-1), axis=0)
+                ),
+            }
+        means = self._ensemble_means(elite_params, obs, action)  # (num_elites, N, D)
+        return {
+            "val_mopo_penalty_epistemic": jnp.mean(
+                jnp.linalg.norm(jnp.std(means, axis=0), axis=-1)
+            )
+        }
+
     def compute_val_mse(self, dataset: Transition) -> jax.Array:
         """Elite-mean MSE over *dataset* (matches the training-time ``val_mse_elite``)."""
         assert self._params is not None and self._elite_idxs is not None
@@ -473,6 +514,7 @@ class EnsembleMLP(EnsembleDynamics):
         n_val = val_obs.shape[0]
         num_elites = self.num_elites
         lr_value = float(cfg.lr)  # constant backprop step size, logged for trainer parity
+        log_mopo_penalty = bool(cfg.get("log_mopo_penalty_scale", False))
 
         def _loss_fn(params, obs_b, action_b, target_b):
             def per_member(pm):
@@ -485,13 +527,20 @@ class EnsembleMLP(EnsembleDynamics):
                     in_axes=(0, 0),
                 )(obs_b, action_b)
 
-            means, logvars, maxlv, minlv = jax.vmap(per_member)(params)  # (N,B,D),(N,D)
+            # means/logvars/maxlv/minlv: (N, B, D). The clamp bounds are per-member
+            # Parameters, so maxlv/minlv are constant along the batch axis (broadcast by
+            # the inner vmap).
+            means, logvars, maxlv, minlv = jax.vmap(per_member)(params)
             if not self.predicts_logvar:  # deterministic: plain MSE, no variance/clamp terms
                 return ((means - target_b[None]) ** 2).sum(0).mean()
             assert logvars is not None and maxlv is not None and minlv is not None
             mse_loss = (((means - target_b[None]) ** 2) * jnp.exp(-logvars)).sum(0).mean()
             var_loss = logvars.sum(0).mean()
-            logvar_diff = (maxlv - minlv).sum()
+            # Dedupe the batch axis ([: , 0]): the clamp regulariser is summed over members
+            # and features only. Summing the (constant) batch axis too scales it by
+            # batch_size, which overwhelms var_loss and drives min_logvar — and the predicted
+            # std — to blow up.
+            logvar_diff = (maxlv[:, 0] - minlv[:, 0]).sum()
             return mse_loss + var_loss + coef * logvar_diff
 
         def _train_step(carry, batch):
@@ -506,6 +555,7 @@ class EnsembleMLP(EnsembleDynamics):
                     log_fn, params, step, loss, val_obs, val_action, val_targets,
                     self._per_member_val_mse, n_ens, num_elites, batch_size, n_val,
                     log_interval, full_validation_interval, lr_value,
+                    self._val_uncertainty_penalties if log_mopo_penalty else None,
                 )
             return (params, opt_state, step), loss
 
@@ -568,6 +618,7 @@ class EnsembleMLP(EnsembleDynamics):
         full_validation_interval = int(cfg.get("full_validation_interval", cfg.log_interval))
         log_interval = int(cfg.log_interval)
         assert log_interval > 0 and full_validation_interval > 0
+        log_mopo_penalty = bool(cfg.get("log_mopo_penalty_scale", False))
 
         reset_optax = bool(cfg.get("reset_optax_state", False))
         lr_schedule_name = str(cfg.eggroll.get("lr_schedule", "constant"))
@@ -697,6 +748,7 @@ class EnsembleMLP(EnsembleDynamics):
                     self._per_member_val_mse, val_obs, val_action, val_targets,
                     lr_schedule, sigma, n_prompts, pop, n_val, n_ens, num_elites,
                     log_interval, full_validation_interval, step_offset,
+                    self._val_uncertainty_penalties if log_mopo_penalty else None,
                 )
             return rng, params, opt_state
 
@@ -758,6 +810,147 @@ class EnsembleMLP(EnsembleDynamics):
         per_member, curve = self._per_member_traj_mse(self._params, windows)
         return per_member.mean(), per_member[self._elite_idxs].mean(), curve.mean(axis=0)
 
+    def compute_traj_grounding(
+        self,
+        episodes: EpisodeBatch,
+        horizon: int,
+        dataset_id: str,
+        include_persistence: bool = False,
+    ) -> tuple[float, float, list[float], dict, dict]:
+        """Standalone-eval grounding for an open-loop rollout over *episodes* at *horizon*.
+
+        Returns ``(traj_mse, traj_mse_elite, raw_curve, nmse_curve, figures)``: the
+        all-member / elite rollout MSE, the raw per-step compounding-error curve, the
+        normalized skill-score overlay vs the trivial-predictor baselines (``mean_state``
+        flat at 1.0, ``final`` and — when ``include_persistence`` — ``persistence`` as
+        ratios), and the rollout-inspection figures. Lets pre-existing checkpoints be
+        retrofitted with the same grounding the trajectory trainers log natively.
+        """
+        assert self._params is not None and self._elite_idxs is not None
+        windows = tile_episodes_to_windows(episodes, horizon)
+        per_member, curve = self._per_member_traj_mse(self._params, windows)
+        raw = _mean_curve_list(curve)
+        obs_mean, reward_mean = _episode_obs_reward_mean(episodes)
+        baselines = _traj_baseline_curves(windows, obs_mean, reward_mean, include_persistence)
+        nmse = _normalized_curve_dict({"final": raw}, baselines)
+        figures = self.build_rollout_figures(self._params, windows, dataset_id)
+        return (
+            float(per_member.mean()),
+            float(per_member[self._elite_idxs].mean()),
+            raw,
+            nmse,
+            figures,
+        )
+
+    def _rollout_states(self, params, windows: TrajectoryWindows) -> jax.Array:
+        """Per-member open-loop predicted ``[next_obs, reward]`` traces. ``(W, E, T, D)``.
+
+        The state-returning analogue of ``_per_member_traj_mse`` (same unroll, base Noiser,
+        absolute-state drift correction ``next_obs = carry + mean[:-1]``), used to *plot*
+        predicted vs real trajectories. Chunked over windows like the MSE pass; intended for
+        a small selected subset of windows, so memory is not a concern.
+        """
+
+        def one_window(w: TrajectoryWindows):
+            def member(params_m):
+                def step(carry_obs, a_t):
+                    mean, _ = self._member_meanlogvar(params_m, carry_obs, a_t)
+                    next_obs = carry_obs + mean[:-1]
+                    return next_obs, jnp.concatenate([next_obs, mean[-1:]])
+
+                _, preds = jax.lax.scan(step, w.start_obs, w.actions)
+                return preds  # (T, D)
+
+            return jax.vmap(member)(params)  # (E, T, D)
+
+        horizon = int(windows.actions.shape[1])
+        chunk = max(1, self._eval_chunk_size // max(horizon, 1))
+        return jax.lax.map(one_window, windows, batch_size=chunk)  # (W, E, T, D)
+
+    def _per_feature_traj_se(
+        self, params, windows: TrajectoryWindows
+    ) -> tuple[jax.Array, jax.Array]:
+        """Open-loop rollout squared error keeping the per-feature axis.
+
+        Returns ``(per_feature (E, T, D), per_window (W,))``: ``per_feature`` is the
+        mask-weighted mean over windows of the per-step, per-feature squared error (for the
+        error heatmap); ``per_window`` is each window's all-member, all-feature, masked-mean
+        MSE (for ranking which windows to plot). Mirrors ``_per_member_traj_mse`` but does not
+        average over the ``D = obs_dim + 1`` features.
+        """
+
+        def one_window(w: TrajectoryWindows):
+            def member(params_m):
+                def step(carry_obs, inp):
+                    a_t, tgt_o, tgt_r, m = inp
+                    mean, _ = self._member_meanlogvar(params_m, carry_obs, a_t)
+                    next_obs = carry_obs + mean[:-1]
+                    pred = jnp.concatenate([next_obs, mean[-1:]])
+                    tgt = jnp.concatenate([tgt_o, tgt_r[None]])
+                    se = (pred - tgt) ** 2  # (D,)
+                    return next_obs, jnp.where(m > 0, se, 0.0)
+
+                _, ses = jax.lax.scan(
+                    step, w.start_obs, (w.actions, w.target_obs, w.target_reward, w.mask)
+                )
+                return ses  # (T, D)
+
+            return jax.vmap(member)(params)  # (E, T, D)
+
+        horizon = int(windows.actions.shape[1])
+        chunk = max(1, self._eval_chunk_size // max(horizon, 1))
+        ses = jax.lax.map(one_window, windows, batch_size=chunk)  # (W, E, T, D)
+        mask = windows.mask  # (W, T)
+        per_feature = ses.sum(axis=0) / jnp.maximum(mask.sum(axis=0), 1.0)[None, :, None]
+        se_feat_mean = ses.mean(axis=-1)  # (W, E, T)
+        per_window = (se_feat_mean * mask[:, None, :]).sum(axis=2) / jnp.maximum(
+            mask.sum(axis=1)[:, None], 1.0
+        )  # (W, E)
+        return per_feature, per_window.mean(axis=1)  # (E, T, D), (W,)
+
+    def build_rollout_figures(
+        self, params, windows: TrajectoryWindows, dataset_id: str
+    ) -> dict:
+        """Render the rollout-inspection figures for ``windows`` as ``{name: Figure}``.
+
+        Produces a per-feature normalized-error heatmap (aggregated over all windows), a
+        true-vs-predicted time-series for the best / median / worst windows by rollout MSE
+        (with the ensemble min/max band), and — for envs with a registered layout (HalfCheetah,
+        Hopper, Adroit pen) — phase portraits for the representative (median) window. Pure
+        host-side rendering; the caller logs them.
+        """
+        from mbrl.world_models import rollout_figures as rf
+
+        per_feature, per_window = self._per_feature_traj_se(params, windows)  # (E,T,D),(W,)
+        _, feat_var = _masked_feature_stats(windows)
+        nmse = per_feature.mean(axis=0) / jnp.where(feat_var > 0, feat_var, 1.0)[None, :]
+        figs: dict = {"rollout_nmse_heatmap": rf.plot_error_heatmap(np.asarray(nmse))}
+
+        sel = rf.select_window_indices(np.asarray(per_window))
+        sub = jax.tree.map(lambda x: x[jnp.asarray(list(sel.values()))], windows)
+        states = self._rollout_states(params, sub)  # (n, E, T, D)
+        pred_mean = np.asarray(states.mean(axis=1))  # (n, T, D)
+        pred_lo, pred_hi = np.asarray(states.min(axis=1)), np.asarray(states.max(axis=1))
+        true_all = np.asarray(
+            jnp.concatenate([sub.target_obs, sub.target_reward[..., None]], axis=-1)
+        )  # (n, T, D)
+        masks = np.asarray(sub.mask)  # (n, T)
+        names = list(sel.keys())
+        for j, name in enumerate(names):
+            v = max(int(masks[j].sum()), 1)  # drop padded / post-terminal steps
+            figs[f"rollout_ts_{name}"] = rf.plot_rollout_timeseries(
+                true_all[j, :v], pred_mean[j, :v], pred_lo[j, :v], pred_hi[j, :v],
+                title=f"rollout ({name})",
+            )
+        med = names.index("median")
+        v = max(int(masks[med].sum()), 1)
+        pp = rf.plot_joint_phase_portraits(
+            true_all[med, :v], pred_mean[med, :v], dataset_id, title="phase portraits (median)"
+        )
+        if pp is not None:
+            figs["phase_portraits"] = pp
+        return figs
+
     def _ensemble_disagreement(self, params, obs, action) -> jax.Array:
         """Mean across features of the cross-member std of predicted means (diversity proxy).
 
@@ -785,6 +978,7 @@ class EnsembleMLP(EnsembleDynamics):
         use_mse = bool(cfg.get("use_mse_fitness", False)) or not self.predicts_logvar
         log_transition = bool(cfg.get("val_transition_mse", True))
         log_disagreement = bool(cfg.get("log_ensemble_disagreement", False))
+        log_mopo_penalty = bool(cfg.get("log_mopo_penalty_scale", False))
         n_ens = self.num_ensemble
         num_elites = self.num_elites
 
@@ -817,6 +1011,12 @@ class EnsembleMLP(EnsembleDynamics):
         tv_obs, tv_action, tv_targets = (
             transition_val.obs, transition_val.action, _targets(transition_val)
         )
+        # Trivial-predictor "knowledge" (train-split means) for the normalized baseline
+        # panels, and the dataset id (for env-specific rollout figures).
+        base_obs_mean, base_reward_mean = _episode_obs_reward_mean(train_eps)
+        dataset_id = str(ws.ckpt.get("dataset_id", ""))
+        log_init_figs = bool(cfg.get("log_init_rollout_figures", False))
+        log_persistence = bool(cfg.get("log_persistence_baseline", False))
 
         lr_schedule = _resolve_schedule(cfg.eggroll, "lr", "lr_schedule", "lr_schedule_kwargs")
         sigma_schedule = _resolve_sigma_schedule(cfg.eggroll)
@@ -941,6 +1141,12 @@ class EnsembleMLP(EnsembleDynamics):
                 "train": _mean_curve_list(init_train_curve),
                 "val": _mean_curve_list(init_val_curve),
             }
+            train_baselines = _traj_baseline_curves(
+                init_train_windows, base_obs_mean, base_reward_mean, log_persistence
+            )
+            val_baselines = _traj_baseline_curves(
+                init_windows, base_obs_mean, base_reward_mean, log_persistence
+            )
             metrics = dict(
                 val_traj_mse=float(tj_pm.mean()),
                 val_traj_mse_elite=float(jnp.sort(tj_pm)[:num_elites].mean()),
@@ -950,6 +1156,12 @@ class EnsembleMLP(EnsembleDynamics):
                 transitions_seen=0, forward_evals=0,
                 train_traj_mse_curve={"init": init_curves["train"]},
                 val_traj_mse_curve={"init": init_curves["val"]},
+                train_traj_nmse_curve=_normalized_curve_dict(
+                    {"init": init_curves["train"]}, train_baselines
+                ),
+                val_traj_nmse_curve=_normalized_curve_dict(
+                    {"init": init_curves["val"]}, val_baselines
+                ),
             )
             if log_transition:
                 tr_pm = self._per_member_val_mse(stacked_params, tv_obs, tv_action, tv_targets)
@@ -958,6 +1170,10 @@ class EnsembleMLP(EnsembleDynamics):
             if log_disagreement:
                 metrics["ensemble_disagreement"] = float(
                     self._ensemble_disagreement(stacked_params, tv_obs, tv_action)
+                )
+            if log_init_figs:
+                metrics["rollout_figures"] = self.build_rollout_figures(
+                    stacked_params, init_windows, dataset_id
                 )
             log_fn(step_offset, **metrics)
 
@@ -998,6 +1214,7 @@ class EnsembleMLP(EnsembleDynamics):
                         log_transition, log_disagreement,
                         lr_value, sigma, num_elites, batch_size, horizon, pop, n_ens,
                         log_interval, full_validation_interval, step_offset,
+                        self._val_uncertainty_penalties if log_mopo_penalty else None,
                     )
                 return rng, params, opt_state
 
@@ -1027,18 +1244,25 @@ class EnsembleMLP(EnsembleDynamics):
                 train_eps, final_horizon, int(final_val_windows.start_obs.shape[0]), split_seed
             )
             train_pm, train_curve = self._per_member_traj_mse(params, final_train_windows)
+            train_curves = {"init": init_curves["train"], "final": _mean_curve_list(train_curve)}
+            val_curves = {"init": init_curves["val"], "final": _mean_curve_list(curve)}
+            train_baselines = _traj_baseline_curves(
+                final_train_windows, base_obs_mean, base_reward_mean, log_persistence
+            )
+            val_baselines = _traj_baseline_curves(
+                final_val_windows, base_obs_mean, base_reward_mean, log_persistence
+            )
             metrics: dict = {
-                "train_traj_mse_curve": {
-                    "init": init_curves["train"],
-                    "final": _mean_curve_list(train_curve),
-                },
-                "val_traj_mse_curve": {
-                    "init": init_curves["val"],
-                    "final": _mean_curve_list(curve),
-                },
+                "train_traj_mse_curve": train_curves,
+                "val_traj_mse_curve": val_curves,
+                "train_traj_nmse_curve": _normalized_curve_dict(train_curves, train_baselines),
+                "val_traj_nmse_curve": _normalized_curve_dict(val_curves, val_baselines),
                 "val_traj_mse": float(per_member_scalar.mean()),
                 "val_traj_mse_elite": float(jnp.sort(per_member_scalar)[:num_elites].mean()),
                 "train_traj_mse": float(train_pm.mean()),
+                "rollout_figures": self.build_rollout_figures(
+                    params, final_val_windows, dataset_id
+                ),
             }
             if log_disagreement:
                 metrics["ensemble_disagreement"] = float(
@@ -1070,6 +1294,7 @@ class EnsembleMLP(EnsembleDynamics):
         freeze_clamp = bool(cfg.get("freeze_logvar_clamp", False)) and self.predicts_logvar
         log_transition = bool(cfg.get("val_transition_mse", True))
         log_disagreement = bool(cfg.get("log_ensemble_disagreement", False))
+        log_mopo_penalty = bool(cfg.get("log_mopo_penalty_scale", False))
         keep_best = bool(cfg.get("keep_best", True))
         max_grad_norm = float(cfg.get("max_grad_norm", 0.0))  # <=0 disables clipping
         remat_scan = bool(cfg.get("remat_scan", True))
@@ -1102,6 +1327,12 @@ class EnsembleMLP(EnsembleDynamics):
         tv_obs, tv_action, tv_targets = (
             transition_val.obs, transition_val.action, _targets(transition_val)
         )
+        # Trivial-predictor "knowledge" (train-split means) for the normalized baseline
+        # panels, and the dataset id (for env-specific rollout figures).
+        base_obs_mean, base_reward_mean = _episode_obs_reward_mean(train_eps)
+        dataset_id = str(ws.ckpt.get("dataset_id", ""))
+        log_init_figs = bool(cfg.get("log_init_rollout_figures", False))
+        log_persistence = bool(cfg.get("log_persistence_baseline", False))
 
         rng, init_rng = jax.random.split(rng)
         stacked_params, single_params, frozen_params, scan_map, _ = self._init_members(
@@ -1208,6 +1439,12 @@ class EnsembleMLP(EnsembleDynamics):
                 "train": _mean_curve_list(init_train_curve),
                 "val": _mean_curve_list(init_val_curve),
             }
+            train_baselines = _traj_baseline_curves(
+                init_train_windows, base_obs_mean, base_reward_mean, log_persistence
+            )
+            val_baselines = _traj_baseline_curves(
+                init_windows, base_obs_mean, base_reward_mean, log_persistence
+            )
             metrics = dict(
                 val_traj_mse=float(tj_pm.mean()),
                 val_traj_mse_elite=float(jnp.sort(tj_pm)[:num_elites].mean()),
@@ -1216,6 +1453,12 @@ class EnsembleMLP(EnsembleDynamics):
                 transitions_seen=0, forward_evals=0,
                 train_traj_mse_curve={"init": init_curves["train"]},
                 val_traj_mse_curve={"init": init_curves["val"]},
+                train_traj_nmse_curve=_normalized_curve_dict(
+                    {"init": init_curves["train"]}, train_baselines
+                ),
+                val_traj_nmse_curve=_normalized_curve_dict(
+                    {"init": init_curves["val"]}, val_baselines
+                ),
             )
             if log_transition:
                 tr_pm = self._per_member_val_mse(stacked_params, tv_obs, tv_action, tv_targets)
@@ -1224,6 +1467,10 @@ class EnsembleMLP(EnsembleDynamics):
             if log_disagreement:
                 metrics["ensemble_disagreement"] = float(
                     self._ensemble_disagreement(stacked_params, tv_obs, tv_action)
+                )
+            if log_init_figs:
+                metrics["rollout_figures"] = self.build_rollout_figures(
+                    stacked_params, init_windows, dataset_id
                 )
             log_fn(step_offset, **metrics)
 
@@ -1273,6 +1520,7 @@ class EnsembleMLP(EnsembleDynamics):
                         log_transition, log_disagreement,
                         float(cfg.lr), num_elites, batch_size, horizon, n_ens,
                         batches_per_epoch, log_interval, full_validation_interval, step_offset,
+                        self._val_uncertainty_penalties if log_mopo_penalty else None,
                     )
                 return params, opt_state, best_params, best_val
 
@@ -1302,18 +1550,25 @@ class EnsembleMLP(EnsembleDynamics):
                 train_eps, final_horizon, int(final_val_windows.start_obs.shape[0]), split_seed
             )
             train_pm, train_curve = self._per_member_traj_mse(params, final_train_windows)
+            train_curves = {"init": init_curves["train"], "final": _mean_curve_list(train_curve)}
+            val_curves = {"init": init_curves["val"], "final": _mean_curve_list(curve)}
+            train_baselines = _traj_baseline_curves(
+                final_train_windows, base_obs_mean, base_reward_mean, log_persistence
+            )
+            val_baselines = _traj_baseline_curves(
+                final_val_windows, base_obs_mean, base_reward_mean, log_persistence
+            )
             metrics = {
-                "train_traj_mse_curve": {
-                    "init": init_curves["train"],
-                    "final": _mean_curve_list(train_curve),
-                },
-                "val_traj_mse_curve": {
-                    "init": init_curves["val"],
-                    "final": _mean_curve_list(curve),
-                },
+                "train_traj_mse_curve": train_curves,
+                "val_traj_mse_curve": val_curves,
+                "train_traj_nmse_curve": _normalized_curve_dict(train_curves, train_baselines),
+                "val_traj_nmse_curve": _normalized_curve_dict(val_curves, val_baselines),
                 "val_traj_mse": float(per_member_scalar.mean()),
                 "val_traj_mse_elite": float(jnp.sort(per_member_scalar)[:num_elites].mean()),
                 "train_traj_mse": float(train_pm.mean()),
+                "rollout_figures": self.build_rollout_figures(
+                    params, final_val_windows, dataset_id
+                ),
             }
             if log_disagreement:
                 metrics["ensemble_disagreement"] = float(
@@ -1329,6 +1584,101 @@ def _mean_curve_list(curve) -> list[float]:
     """All-member mean of a (num_ensemble, T) per-step MSE curve, as a plain list."""
     mean = curve.mean(axis=0)
     return [float(mean[t]) for t in range(int(mean.shape[0]))]
+
+
+def _episode_obs_reward_mean(episodes: EpisodeBatch) -> tuple[jax.Array, jax.Array]:
+    """Masked per-feature ``(obs_mean (obs_dim,), reward_mean ())`` over real transitions.
+
+    The "blind model's" knowledge for the trivial-predictor baselines, taken over the
+    transition start-states (matching ``DatasetInfo.obs_mean``) and rewards of one split.
+    """
+    mask = episodes.step_mask  # (E, L)
+    n = jnp.maximum(mask.sum(), 1.0)
+    reward_mean = (episodes.rewards * mask).sum() / n
+    obs = episodes.obs[:, : mask.shape[1], :]  # start state of each transition
+    obs_mean = (obs * mask[..., None]).sum(axis=(0, 1)) / n
+    return obs_mean, reward_mean
+
+
+def _masked_feature_stats(windows: TrajectoryWindows) -> tuple[jax.Array, jax.Array]:
+    """Per-feature ``(mean (D,), var (D,))`` of the rollout targets over valid steps.
+
+    ``D = obs_dim + 1`` (next-state + reward). The variance is the error a constant
+    mean-predictor incurs, i.e. the natural denominator for a normalized MSE / skill score.
+    """
+    target = jnp.concatenate(
+        [windows.target_obs, windows.target_reward[..., None]], axis=-1
+    )  # (W, T, D)
+    m = windows.mask[..., None]  # (W, T, 1)
+    n = jnp.maximum(m.sum(), 1.0)
+    mean = (target * m).sum(axis=(0, 1)) / n
+    var = ((target - mean) ** 2 * m).sum(axis=(0, 1)) / n
+    return mean, var
+
+
+def _traj_baseline_curves(
+    windows: TrajectoryWindows,
+    obs_mean: jax.Array,
+    reward_mean: jax.Array,
+    include_persistence: bool = True,
+) -> dict[str, list[float]]:
+    """Trivial-predictor open-loop rollout MSE curves (raw units), matching the masking and
+    per-feature averaging of ``EnsembleMLP._per_member_traj_mse``.
+
+    Always returns ``{"mean_state": [T]}`` and, when ``include_persistence``, also
+    ``"persistence": [T]`` — pure functions of the data (no model) that ground the model curves:
+      ``mean_state``  — predict the constant ``[obs_mean, reward_mean]`` at every step (the
+                        ceiling: a model reaching this line is no better than ignoring its input).
+      ``persistence`` — open-loop zero-delta: predict ``start_obs`` every step (reward
+                        ``reward_mean``). On slow dynamics it is the tighter bar to beat; on
+                        oscillatory dynamics it overshoots ``mean_state`` (hump-shaped), so it is
+                        opt-in to avoid inflating the panel's y-range when it is not binding.
+    """
+    target = jnp.concatenate(
+        [windows.target_obs, windows.target_reward[..., None]], axis=-1
+    )  # (W, T, D)
+    reward_mean = jnp.atleast_1d(reward_mean)
+    const_mean = jnp.concatenate([obs_mean, reward_mean])  # (D,)
+    se_mean = jnp.mean((const_mean[None, None, :] - target) ** 2, axis=-1)  # (W, T)
+    denom = jnp.maximum(windows.mask.sum(axis=0), 1.0)  # (T,)
+    curves = {
+        "mean_state": [float(v) for v in (se_mean * windows.mask).sum(axis=0) / denom],
+    }
+    if include_persistence:
+        pers_pred = jnp.concatenate(
+            [
+                jnp.broadcast_to(windows.start_obs[:, None, :], windows.target_obs.shape),
+                jnp.broadcast_to(reward_mean, windows.target_reward.shape + (1,)),
+            ],
+            axis=-1,
+        )  # (W, T, D)
+        se_pers = jnp.mean((pers_pred - target) ** 2, axis=-1)  # (W, T)
+        curves["persistence"] = [
+            float(v) for v in (se_pers * windows.mask).sum(axis=0) / denom
+        ]
+    return curves
+
+
+def _normalized_curve_dict(
+    model_curves: dict[str, list[float]], baselines: dict[str, list[float]]
+) -> dict[str, list[float]]:
+    """Build the normalized (skill-score / NMSE) panel dict: divide every model and
+    ``persistence`` curve elementwise by the per-step ``mean_state`` variance, and add the
+    flat ``mean_state ≡ 1.0`` reference. Curves are O(1) regardless of raw units, so the
+    large-scale baselines never squash the model curves.
+    """
+    ms = jnp.asarray(baselines["mean_state"])
+    safe = jnp.where(ms > 0, ms, 1.0)
+
+    def _norm(curve) -> list[float]:
+        c = jnp.asarray(curve)
+        return [float(v) for v in c / safe[: c.shape[0]]]
+
+    out = {k: _norm(v) for k, v in model_curves.items()}
+    if "persistence" in baselines:
+        out["persistence"] = _norm(baselines["persistence"])
+    out["mean_state"] = [1.0] * int(ms.shape[0])
+    return out
 
 
 def _sample_train_curve_windows(
@@ -1374,7 +1724,7 @@ def _resolve_sigma_schedule(eg_cfg) -> optax.Schedule:
 def _emit_backprop_log(
     log_fn, params, step, train_loss, val_obs, val_action, val_targets,
     per_member_val_mse, n_ens, num_elites, batch_size, n_val,
-    log_interval, full_validation_interval, lr,
+    log_interval, full_validation_interval, lr, uncertainty_fn=None,
 ) -> None:
     should_validate = (step % full_validation_interval == 0)
     should_log = (step % log_interval == 0) | should_validate
@@ -1389,18 +1739,24 @@ def _emit_backprop_log(
         s = int(step_i)
         log_fn(s, float(loss_i), float("nan"), _ts(s), _fe(s), lr=lr)
 
-    def _val_cb(step_i, loss_i, val_mse_i, val_elite_i) -> None:
+    def _val_cb(step_i, loss_i, val_mse_i, val_elite_i, extra) -> None:
         s = int(step_i)
         log_fn(
             s, float(loss_i), float(val_mse_i), _ts(s), _fe(s),
             lr=lr, val_mse_elite=float(val_elite_i),
+            **{k: float(v) for k, v in extra.items()},
         )
 
     def _with_val(_):
         per_member = per_member_val_mse(params, val_obs, val_action, val_targets)
+        extra = (
+            uncertainty_fn(params, val_obs, val_action, jnp.argsort(per_member)[:num_elites])
+            if uncertainty_fn is not None
+            else {}
+        )
         jax.debug.callback(
             _val_cb, step, train_loss, per_member.mean(),
-            jnp.sort(per_member)[:num_elites].mean(),
+            jnp.sort(per_member)[:num_elites].mean(), extra,
         )
 
     def _train_only(_):
@@ -1418,7 +1774,7 @@ def _emit_eggroll_log(
     log_fn, params, epoch, train_loss, fitness_std,
     per_member_val_mse, val_obs, val_action, val_targets,
     lr_schedule, sigma, n_prompts, pop, n_val, n_ens, num_elites,
-    log_interval, full_validation_interval, step_offset,
+    log_interval, full_validation_interval, step_offset, uncertainty_fn=None,
 ) -> None:
     step = epoch + 1
     should_validate = (epoch == 0) | (step % full_validation_interval == 0)
@@ -1437,20 +1793,26 @@ def _emit_eggroll_log(
             lr=float(lr_i), sigma=float(sigma_i), fitness_std=float(std_i),
         )
 
-    def _val_cb(step_i, loss_i, std_i, val_mse_i, val_elite_i, lr_i, sigma_i) -> None:
+    def _val_cb(step_i, loss_i, std_i, val_mse_i, val_elite_i, lr_i, sigma_i, extra) -> None:
         s = int(step_i)
         t, f = _eggroll_work_counters(s, n_prompts, pop_n, nval_n, full_validation_interval)
         log_fn(
             s + step_offset, float(loss_i), float(val_mse_i), t, f,
             lr=float(lr_i), sigma=float(sigma_i), val_mse_elite=float(val_elite_i),
             fitness_std=float(std_i),
+            **{k: float(v) for k, v in extra.items()},
         )
 
     def _with_val(_):
         per_member = per_member_val_mse(params, val_obs, val_action, val_targets)
+        extra = (
+            uncertainty_fn(params, val_obs, val_action, jnp.argsort(per_member)[:num_elites])
+            if uncertainty_fn is not None
+            else {}
+        )
         jax.debug.callback(
             _val_cb, step, train_loss, fitness_std, per_member.mean(),
-            jnp.sort(per_member)[:num_elites].mean(), lr_value, sigma,
+            jnp.sort(per_member)[:num_elites].mean(), lr_value, sigma, extra,
         )
 
     def _train_only(_):
@@ -1470,7 +1832,7 @@ def _emit_traj_log(
     val_mse_and_disagreement, tv_obs, tv_action, tv_targets,
     log_transition, log_disagreement,
     lr_value, sigma, num_elites, batch_size, horizon, pop, n_ens,
-    log_interval, full_validation_interval, step_offset,
+    log_interval, full_validation_interval, step_offset, uncertainty_fn=None,
 ) -> None:
     """Phase-2 logging: training NLL + MSE-only validation, on the ``world_model_ft`` axis.
 
@@ -1520,6 +1882,11 @@ def _emit_traj_log(
                 vals["val_transition_mse_elite"] = jnp.sort(tr_pm)[:num_elites].mean()
             if log_disagreement:
                 vals["ensemble_disagreement"] = disagreement
+        if uncertainty_fn is not None:
+            # Elites are selected by trajectory val MSE (as at final selection), matching MOPO.
+            vals.update(
+                uncertainty_fn(params, tv_obs, tv_action, jnp.argsort(tj_pm)[:num_elites])
+            )
         jax.debug.callback(_cb, step, vals)
 
     def _train_only(_):
@@ -1540,6 +1907,7 @@ def _emit_bptt_traj_log(
     log_transition, log_disagreement,
     lr_value, num_elites, batch_size, horizon, n_ens,
     batches_per_epoch, log_interval, full_validation_interval, step_offset,
+    uncertainty_fn=None,
 ) -> None:
     """Phase-2 BPTT logging: training loss + MSE-only validation, ``world_model_ft`` axis.
 
@@ -1589,6 +1957,11 @@ def _emit_bptt_traj_log(
                 vals["val_transition_mse_elite"] = jnp.sort(tr_pm)[:num_elites].mean()
             if log_disagreement:
                 vals["ensemble_disagreement"] = disagreement
+        if uncertainty_fn is not None:
+            # Elites are selected by trajectory val MSE (as at final selection), matching MOPO.
+            vals.update(
+                uncertainty_fn(params, tv_obs, tv_action, jnp.argsort(tj_pm)[:num_elites])
+            )
         jax.debug.callback(_cb, step, vals)
 
     def _train_only(_):

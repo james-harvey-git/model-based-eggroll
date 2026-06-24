@@ -240,6 +240,12 @@ class Logger:
         provenance = _finetune_provenance(cfg)
         self.finetune_lineage: str | None = provenance.get("finetune_lineage")
 
+        # W&B run identity, recorded into checkpoints so a later wm_eval can append its
+        # outputs to the run that trained the model. None when W&B is disabled.
+        self.run_id: str | None = None
+        self.run_entity: str | None = None
+        self.run_project: str | None = None
+
         wandb_cfg = cfg.get("wandb", {})
         self.enabled: bool = wandb_cfg.get("enabled", False)  # type: ignore[union-attr]
         if self.enabled:
@@ -257,6 +263,39 @@ class Logger:
                 config=config_dict,
             )
             _define_step_metrics()
+            self._record_run_identity()
+
+    def _record_run_identity(self) -> None:
+        if wandb.run is not None:
+            self.run_id = wandb.run.id
+            self.run_entity = wandb.run.entity
+            self.run_project = wandb.run.project
+
+    @classmethod
+    def resume_run(
+        cls,
+        cfg: DictConfig,
+        run_id: str,
+        entity: str,
+        project: str,
+        wm_group: str | None = None,
+    ) -> "Logger":
+        """Create a Logger that re-attaches to an existing W&B run and appends to it.
+
+        Used by the wm_eval stage to log its outputs back onto the world-model training
+        run that produced the evaluated checkpoint, rather than spawning a new run. The
+        run's original name/group/config are preserved (we pass only id + resume).
+        """
+        instance = cls.__new__(cls)
+        instance.enabled = True
+        instance.wm_group = wm_group or ""
+        provenance = _finetune_provenance(cfg)
+        instance.finetune_lineage = provenance.get("finetune_lineage")
+        instance.run_id = instance.run_entity = instance.run_project = None
+        wandb.init(project=project, entity=entity, id=run_id, resume="allow")
+        _define_step_metrics()
+        instance._record_run_identity()
+        return instance
 
     @classmethod
     def from_existing_run(cls, cfg: DictConfig, wm_group: str | None = None) -> "Logger":
@@ -272,6 +311,7 @@ class Logger:
         instance.wm_group = wm_group or ""
         provenance = _finetune_provenance(cfg)
         instance.finetune_lineage = provenance.get("finetune_lineage")
+        instance.run_id = instance.run_entity = instance.run_project = None
         if wandb.run is not None:
             # allow_val_change: legend keys (lr, population_size, ...) collide with
             # the flat swept-param keys the sweep agent already set on the run.
@@ -279,6 +319,7 @@ class Logger:
                 {**_legend_fields(cfg), **provenance}, allow_val_change=True
             )
             _define_step_metrics()
+            instance._record_run_identity()
         return instance
 
     def finish(self) -> None:
@@ -352,6 +393,23 @@ class Logger:
             }
         )
 
+    def log_world_model_finetune_image(self, name: str, fig, generation: int) -> None:
+        """Log a matplotlib figure on the ``world_model_ft`` axis, then close it.
+
+        Logged against ``world_model_ft/generation`` so the pre-fine-tune (gen 0) and
+        end-of-run frames are distinct entries in the media panel.
+        """
+        import matplotlib.pyplot as plt
+
+        if self.enabled:
+            wandb.log(
+                {
+                    f"world_model_ft/{name}": wandb.Image(fig),
+                    "world_model_ft/generation": int(generation),
+                }
+            )
+        plt.close(fig)
+
     def log_policy_step(self, step: int, **metrics: float) -> None:
         """Log policy training metrics (return, entropy, critic loss, etc.).
 
@@ -384,10 +442,19 @@ class Logger:
         traj_mse: float | None = None,
         traj_mse_elite: float | None = None,
         traj_mse_curve: list[float] | None = None,
+        traj_nmse_curve: dict | None = None,
+        figures: dict | None = None,
     ) -> None:
         """Log world-model eval metrics on an arbitrary eval dataset: the one-step val
-        MSE, plus (when provided) the open-loop rollout MSE and its per-step curve."""
+        MSE, plus (when provided) the open-loop rollout MSE, its raw per-step curve, the
+        normalized (skill-score) overlay vs the trivial-predictor baselines, and the
+        rollout-inspection figures."""
+        import matplotlib.pyplot as plt
+
         if not self.enabled:
+            if figures:
+                for fig in figures.values():
+                    plt.close(fig)
             return
         metrics: dict = {
             "wm_eval/val_mse": val_mse,
@@ -406,4 +473,17 @@ class Logger:
             metrics["wm_eval/traj_mse_curve"] = wandb.plot.line(
                 table, "rollout_step", "mse", title="traj_mse_curve"
             )
+        if traj_nmse_curve is not None:
+            keys = list(traj_nmse_curve)
+            ys = [[float(v) for v in traj_nmse_curve[k]] for k in keys]
+            xs = [list(range(1, len(y) + 1)) for y in ys]
+            metrics["wm_eval/traj_nmse_curve"] = wandb.plot.line_series(
+                xs=xs, ys=ys, keys=keys, title="traj_nmse_curve", xname="rollout_step"
+            )
+        if figures is not None:
+            for name, fig in figures.items():
+                metrics[f"wm_eval/{name}"] = wandb.Image(fig)
         wandb.log(metrics)
+        if figures is not None:
+            for fig in figures.values():
+                plt.close(fig)

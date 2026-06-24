@@ -58,14 +58,21 @@ def run(cfg: DictConfig, logger: Logger) -> None:
     traj_kwargs: dict = {}
     traj_horizon = int(cfg.get("wm_eval", {}).get("traj_horizon", 0) or 0)
     if traj_horizon > 0:
-        compute_traj_mse = getattr(world_model, "compute_traj_mse", None)
-        if compute_traj_mse is not None:
+        compute_grounding = getattr(world_model, "compute_traj_grounding", None)
+        if compute_grounding is not None:
             episodes, _ = load_episodes(cfg.dataset.name)
-            traj_mse, traj_mse_elite, curve = compute_traj_mse(episodes, traj_horizon)
+            include_persistence = bool(
+                cfg.get("wm_eval", {}).get("log_persistence_baseline", False)
+            )
+            traj_mse, traj_mse_elite, curve, nmse, figures = compute_grounding(
+                episodes, traj_horizon, info.dataset_id, include_persistence
+            )
             traj_kwargs = dict(
                 traj_mse=float(traj_mse),
                 traj_mse_elite=float(traj_mse_elite),
                 traj_mse_curve=[float(v) for v in curve],
+                traj_nmse_curve=nmse,
+                figures=figures,
             )
             print(
                 f"wm_eval: traj_mse@h{traj_horizon}={traj_kwargs['traj_mse']:.6f} "
@@ -73,7 +80,7 @@ def run(cfg: DictConfig, logger: Logger) -> None:
             )
         else:
             print(
-                "wm_eval: world-model class has no compute_traj_mse; "
+                "wm_eval: world-model class has no compute_traj_grounding; "
                 "skipping rollout evaluation."
             )
 

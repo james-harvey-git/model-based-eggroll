@@ -12,6 +12,7 @@ are mathematically equal up to float ordering.
 """
 
 import pickle
+from unittest.mock import MagicMock, patch
 
 import jax
 import jax.numpy as jnp
@@ -19,6 +20,7 @@ import numpy as np
 from omegaconf import DictConfig, OmegaConf
 import pytest
 
+from mbrl import main as main_mod
 from mbrl.data import Transition, derive_train_val_split, train_val_split
 from mbrl.experiments import wm_eval
 from mbrl.logger import Logger
@@ -279,3 +281,51 @@ class TestShapeMismatch:
         ):
             with pytest.raises(ValueError, match="Shape mismatch"):
                 wm_eval.run(cfg, _disabled_logger())
+
+
+def _fake_run(run_id, job_type, created_at):
+    r = MagicMock()
+    r.id, r.job_type, r.created_at = run_id, job_type, created_at
+    return r
+
+
+class TestWmEvalRunResolution:
+    """wm_eval appends to the world-model training run that produced the checkpoint."""
+
+    def test_find_prefers_world_model_over_all(self):
+        runs = [
+            _fake_run("a", "all", "2026-01-02"),
+            _fake_run("w", "world_model", "2026-01-03"),
+            _fake_run("p", "policy", "2026-01-01"),
+        ]
+        with patch("wandb.Api") as api:
+            api.return_value.runs.return_value = runs
+            run_id, entity, project = main_mod._find_wandb_run_by_group("g", "e", "proj")
+        assert (run_id, entity, project) == ("w", "e", "proj")
+
+    def test_find_returns_none_without_training_run(self):
+        with patch("wandb.Api") as api:
+            api.return_value.runs.return_value = [_fake_run("p", "policy", "x")]
+            assert main_mod._find_wandb_run_by_group("g", "e", "proj") == (None, None, None)
+
+    def test_find_handles_api_error(self):
+        with patch("wandb.Api", side_effect=RuntimeError("offline")):
+            assert main_mod._find_wandb_run_by_group("g", "e", "proj") == (None, None, None)
+
+    def test_resolve_prefers_explicit_override(self):
+        cfg = OmegaConf.create({"wandb": {"entity": "e"}, "wm_eval": {"wandb_run_id": "ov"}})
+        ckpt = {"wandb_run_id": "ck", "wandb_entity": "ce", "wandb_project": "cp"}
+        assert main_mod._resolve_wm_eval_run(cfg, ckpt, "g") == ("ov", "ce", "cp")
+
+    def test_resolve_uses_checkpoint_id(self):
+        cfg = OmegaConf.create({"wandb": {}, "wm_eval": {}})
+        run_id, _, _ = main_mod._resolve_wm_eval_run(cfg, {"wandb_run_id": "ck"}, "g")
+        assert run_id == "ck"
+
+    def test_resolve_falls_back_to_group_search(self):
+        cfg = OmegaConf.create({"wandb": {}, "wm_eval": {}})
+        with patch.object(
+            main_mod, "_find_wandb_run_by_group", return_value=("found", "e", "proj")
+        ):
+            run_id, _, _ = main_mod._resolve_wm_eval_run(cfg, {}, "g")
+        assert run_id == "found"

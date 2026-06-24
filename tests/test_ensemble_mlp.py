@@ -601,6 +601,89 @@ class TestEnsembleMLPTrajectory:
         for k in ("val_traj_mse", "val_traj_mse_elite", "train_traj_mse"):
             assert np.isfinite(last[k])
 
+    def test_logs_normalized_nmse_curves(self, backprop_model, synthetic_dataset, tmp_path):
+        """The normalized skill-score panels overlay the model curves on a flat
+        mean_state=1.0 reference (persistence off by default), leaving the raw mse panels
+        untouched."""
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt)), synthetic_dataset, _toy_episodes(), 0,
+            log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        first, last = rows[0], rows[-1]
+        for key in ("train_traj_nmse_curve", "val_traj_nmse_curve"):
+            assert set(first[key]) == {"init", "mean_state"}  # persistence off by default
+            assert set(last[key]) == {"init", "final", "mean_state"}
+            assert last[key]["mean_state"] == [1.0, 1.0]  # flat reference line
+            for series in last[key].values():
+                assert all(np.isfinite(v) for v in series)
+        # Raw mse panels are unchanged (no baselines mixed in).
+        assert set(last["val_traj_mse_curve"]) == {"init", "final"}
+
+    def test_persistence_baseline_opt_in(self, backprop_model, synthetic_dataset, tmp_path):
+        """Persistence appears on the normalized panels only when explicitly enabled."""
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt), log_persistence_baseline=True),
+            synthetic_dataset, _toy_episodes(), 0, log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        last = rows[-1]
+        assert set(last["val_traj_nmse_curve"]) == {"init", "final", "persistence", "mean_state"}
+
+    def test_logs_rollout_figures(self, backprop_model, synthetic_dataset, tmp_path):
+        """Figures are emitted at end of run, and at gen 0 only when explicitly enabled."""
+        from matplotlib.figure import Figure
+
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt), log_init_rollout_figures=True),
+            synthetic_dataset, _toy_episodes(), 0, log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        first, last = rows[0], rows[-1]
+        assert "rollout_figures" in first and "rollout_figures" in last
+        figs = last["rollout_figures"]
+        assert "rollout_nmse_heatmap" in figs
+        assert {"rollout_ts_best", "rollout_ts_median", "rollout_ts_worst"} <= set(figs)
+        assert all(isinstance(f, Figure) for f in figs.values())
+
+        rows2: list[dict] = []
+        _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt)),  # default: no gen-0 figures
+            synthetic_dataset, _toy_episodes(), 0, log_fn=lambda gen, **kw: rows2.append(kw),
+        )
+        assert "rollout_figures" not in rows2[0]
+        assert "rollout_figures" in rows2[-1]
+
+    def test_compute_traj_grounding(self, backprop_model, synthetic_dataset, tmp_path):
+        """The wm_eval retrofit entry point bundles rollout MSE, the raw curve, the
+        normalized overlay, and the figures from a loaded checkpoint."""
+        import matplotlib.pyplot as plt
+
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        model = _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt)), synthetic_dataset, _toy_episodes(), 0
+        )
+        traj_mse, elite, raw, nmse, figs = model.compute_traj_grounding(
+            _toy_episodes(), 3, DATASET_ID
+        )
+        assert np.isfinite(traj_mse) and np.isfinite(elite)
+        assert len(raw) == 3
+        assert set(nmse) == {"final", "mean_state"}  # persistence off by default
+        assert nmse["mean_state"] == [1.0, 1.0, 1.0]
+        assert "rollout_nmse_heatmap" in figs
+        for f in figs.values():
+            plt.close(f)
+        # Opt-in persistence is included when requested.
+        *_, nmse_p, figs_p = model.compute_traj_grounding(
+            _toy_episodes(), 3, DATASET_ID, include_persistence=True
+        )
+        assert "persistence" in nmse_p
+        for f in figs_p.values():
+            plt.close(f)
+
     def test_val_transition_toggle_off(self, backprop_model, synthetic_dataset, tmp_path):
         ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
         rows: list[dict] = []
@@ -736,6 +819,56 @@ def _train_bptt_traj(cfg, dataset, episodes, key, log_fn=None):
     model.train(dataset, cfg, jax.random.key(key), log_fn=log_fn, episodes=episodes)
     jax.effects_barrier()
     return model
+
+
+class TestMopoPenaltyScale:
+    """MOPO uncertainty-penalty scale logging over the validation set (elite members)."""
+
+    def test_penalties_with_logvar_head(self, backprop_model, synthetic_dataset):
+        pen = backprop_model._val_uncertainty_penalties(
+            backprop_model._params,
+            synthetic_dataset.obs[:8], synthetic_dataset.action[:8],
+            backprop_model._elite_idxs,
+        )
+        assert set(pen) == {"val_mopo_penalty_epistemic", "val_mopo_penalty_aleatoric"}
+        assert all(np.isfinite(float(v)) and float(v) >= 0 for v in pen.values())
+
+    def test_penalties_without_logvar_head(self, synthetic_dataset):
+        model = _train(_backprop_cfg(disable_logvar_predictions=True), synthetic_dataset, 0)
+        pen = model._val_uncertainty_penalties(
+            model._params, synthetic_dataset.obs[:8], synthetic_dataset.action[:8],
+            model._elite_idxs,
+        )
+        assert set(pen) == {"val_mopo_penalty_epistemic"}  # no aleatoric without a logvar head
+
+    def test_restricts_to_elites(self, backprop_model, synthetic_dataset):
+        """Restricting to a single elite collapses the cross-member (epistemic) std to 0,
+        confirming the penalty is computed over the passed elite indices, not all members."""
+        pen = backprop_model._val_uncertainty_penalties(
+            backprop_model._params, synthetic_dataset.obs[:8], synthetic_dataset.action[:8],
+            backprop_model._elite_idxs[:1],
+        )
+        assert float(pen["val_mopo_penalty_epistemic"]) == pytest.approx(0.0, abs=1e-6)
+
+    def test_logged_when_enabled(self, backprop_model, synthetic_dataset, tmp_path):
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt), log_mopo_penalty_scale=True),
+            synthetic_dataset, _toy_episodes(), 0, log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        keys = set().union(*(r.keys() for r in rows))
+        assert {"val_mopo_penalty_epistemic", "val_mopo_penalty_aleatoric"} <= keys
+
+    def test_off_by_default(self, backprop_model, synthetic_dataset, tmp_path):
+        ckpt = _write_ckpt(backprop_model, _backprop_cfg(), tmp_path)
+        rows: list[dict] = []
+        _train_traj(
+            _traj_cfg(init_checkpoint=str(ckpt)), synthetic_dataset, _toy_episodes(), 0,
+            log_fn=lambda gen, **kw: rows.append(kw),
+        )
+        keys = set().union(*(r.keys() for r in rows))
+        assert not any("mopo_penalty" in k for k in keys)
 
 
 class TestEnsembleMLPBpttTrajectory:

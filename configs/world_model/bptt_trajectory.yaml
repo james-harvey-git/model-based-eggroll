@@ -45,6 +45,18 @@ freeze_logvar_clamp: false        # ablation: hold max/min_logvar at Phase-1 val
 trajectory_validation_split: 0.2  # episode-level held-out fraction (matches eggroll_trajectory)
 val_transition_mse: true          # also log the comparable one-step val MSE (toggle off if slow)
 log_ensemble_disagreement: true   # cross-member std at start/end + every full validation
+# Log the scale of MOPO's uncertainty penalty over the validation set every full validation
+# (epistemic always; aleatoric when a logvar head exists), to calibrate penalty_coeff. Off by
+# default (adds one elite forward pass per validation).
+log_mopo_penalty_scale: false
+# Also render the rollout-inspection figures (per-feature time-series, NMSE heatmap,
+# halfcheetah phase portraits) at gen 0 for a before/after fine-tune comparison. They are
+# always rendered at end of run; the gen-0 pass is off by default as it is not free.
+log_init_rollout_figures: false
+# Overlay the open-loop zero-delta (persistence) baseline on the normalized panels. Off by
+# default: on oscillatory dynamics it overshoots the mean_state=1.0 line and inflates the
+# y-range; enable it for slow-dynamics datasets where it is the binding bar to beat.
+log_persistence_baseline: false
 # Chunk size for full-set evaluations (val MSE, rollout curves): bounds peak memory.
 eval_chunk_size: 16384
 # false drops the optimiser state from the checkpoint (halves size; only fine-tunes
