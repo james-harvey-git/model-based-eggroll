@@ -662,6 +662,7 @@ class EnsembleMLP(EnsembleDynamics):
             solver_kwargs=solver_kwargs,
             group_size=group_size,
             noise_reuse=int(cfg.eggroll.noise_reuse),
+            rank=int(cfg.eggroll.get("rank", 1)),
             use_batched_update=bool(cfg.eggroll.get("use_batched_update", False)),
         )
         solver = fnp["solver"]
@@ -1035,6 +1036,7 @@ class EnsembleMLP(EnsembleDynamics):
             solver_kwargs=_container(cfg.eggroll.get("solver_kwargs", {})),
             group_size=0,  # decoupled batch: all perturbations share the window batch
             noise_reuse=int(cfg.eggroll.get("noise_reuse", 1)),
+            rank=int(cfg.eggroll.get("rank", 1)),
             use_batched_update=bool(cfg.eggroll.get("use_batched_update", True)),
         )
         solver = fnp["solver"]
