@@ -40,6 +40,7 @@ eggroll:
   solver: adamw
   solver_kwargs: {weight_decay: 1e-5, b1: 0.9}
   noise_reuse: 1
+  rank: 1                         # LoRA rank for weight-matrix perturbations
   sigma: 0.02
   sigma_decay_rate: 0.999995
   sigma_schedule: exponential     # constant | exponential | cosine | linear

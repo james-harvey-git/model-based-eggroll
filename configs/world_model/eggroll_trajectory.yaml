@@ -63,6 +63,7 @@ eggroll:
   solver: sgd
   solver_kwargs: {}
   noise_reuse: 1
+  rank: 1                         # LoRA rank for weight-matrix perturbations
   sigma: 0.01                     # to be swept
   # Decays sigma to ~5% of its initial value by num_epochs=10000 (0.05 ** (1/10000)).
   # Recompute by hand if num_epochs changes.
