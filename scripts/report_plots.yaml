@@ -1,0 +1,80 @@
+# Report figure config for scripts/report_plots.py — fill in your CLUSTER checkpoint paths.
+#   uv run python scripts/report_plots.py --config scripts/report_plots.yaml
+# Each curve_plot overlays its groups on one axis; a group with several checkpoints
+# (seeds) gets a mean line + error band, a single checkpoint gets just a line.
+# on=val reproduces the held-out fine-tune val episodes (set val_split + split_seed to
+# match the fine-tune run); on=all uses the whole dataset (cross-policy transfer).
+
+outdir: report_figures
+
+curve_plots:
+  # Plot 1: validation trajectory MSE — shared unfine-tuned checkpoint + fine-tuned models.
+  - name: halfcheetah_val_traj_mse
+    dataset_id: mujoco/halfcheetah/medium-v0
+    horizon: 5                 # eggroll only has T=5 ckpts → compare BPTT at T=5
+    eval_on: own_val           # each ckpt on its OWN held-out split (independent seeds)
+    val_split: 0.2             # Phase-1 fallback fraction only (Phase-1 records no traj split)
+    title: HalfCheetah medium — validation rollout MSE
+    band: std                  # std | sem | none
+    groups:
+      - label: unfine-tuned (Phase 1)
+        checkpoints:
+          - /REPLACE/phase1_s0/world_model.pkl
+          - /REPLACE/phase1_s1/world_model.pkl
+          - /REPLACE/phase1_s2/world_model.pkl
+        color: gray
+        linestyle: ":"
+      - label: BPTT (T=5)
+        checkpoints:
+          - /REPLACE/bptt_t5_s0/world_model.pkl
+          - /REPLACE/bptt_t5_s1/world_model.pkl
+          - /REPLACE/bptt_t5_s2/world_model.pkl
+        color: C0
+      - label: EGGROLL (T=5)
+        checkpoints:
+          - /REPLACE/eggroll_t5_s0/world_model.pkl
+        color: C1
+
+  # Plot 2: cross-policy transfer — medium-fine-tuned models evaluated on EXPERT data.
+  - name: halfcheetah_transfer_to_expert
+    dataset_id: mujoco/halfcheetah/expert-v0
+    horizon: 5
+    eval_on: all
+    title: HalfCheetah — transfer to expert (rollout MSE)
+    groups:
+      - label: BPTT (T=5)
+        checkpoints: [/REPLACE/bptt_t5_s0/world_model.pkl]
+        color: C0
+      - label: EGGROLL (T=5)
+        checkpoints: [/REPLACE/eggroll_t5_s0/world_model.pkl]
+        color: C1
+
+  # Plot 3 (BPTT-only, longer horizons on its own, evaluated on expert) — BPTT is cheap.
+  - name: bptt_longhorizon_transfer_expert
+    dataset_id: mujoco/halfcheetah/expert-v0
+    horizon: 20
+    eval_on: all
+    title: BPTT long-horizon — transfer to expert
+    groups:
+      - label: BPTT (T=5)
+        checkpoints: [/REPLACE/bptt_t5_s0/world_model.pkl]
+        color: C0
+      - label: BPTT (T=20)
+        checkpoints: [/REPLACE/bptt_t20_s0/world_model.pkl]
+        color: C2
+
+rollout_figures:               # heatmap / phase-portrait / time-series per checkpoint
+  - checkpoint: /REPLACE/eggroll_t5_s0/world_model.pkl
+    dataset_id: mujoco/halfcheetah/medium-v0
+    horizon: 5
+    eval_on: val
+    val_split: 0.2
+    split_seed: 0
+    prefix: eggroll_t5
+  - checkpoint: /REPLACE/bptt_t5_s0/world_model.pkl
+    dataset_id: mujoco/halfcheetah/medium-v0
+    horizon: 5
+    eval_on: val
+    val_split: 0.2
+    split_seed: 0
+    prefix: bptt_t5
