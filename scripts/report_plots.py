@@ -191,6 +191,19 @@ def _draw_curves(spec: CurvePlot, ax, ylabel: bool = True, legend: bool = True) 
             for p in g.checkpoints
         ]
         mean, std = _aggregate_seeds(curves)
+        # Exact final-horizon-step numbers for the report (mean ± std over seeds; just the
+        # value for a single-seed curve, where std is undefined).
+        t_final = mean.shape[0]
+        if std is not None:
+            print(
+                f"    [{spec.name}] {g.label}: final-step (t={t_final}) MSE = "
+                f"{mean[-1]:.6g} ± {std[-1]:.6g}  (std over n={len(curves)} seeds)"
+            )
+        else:
+            print(
+                f"    [{spec.name}] {g.label}: final-step (t={t_final}) MSE = "
+                f"{mean[-1]:.6g}  (single seed)"
+            )
         steps = np.arange(1, mean.shape[0] + 1)
         (line,) = ax.plot(
             steps, mean, label=g.label, color=g.color, linestyle=g.linestyle, lw=2
