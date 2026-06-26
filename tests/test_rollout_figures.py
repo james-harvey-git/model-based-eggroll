@@ -141,6 +141,13 @@ class TestFigures:
         drawn = [ax for ax in fig.axes if ax.has_data()]
         assert len(drawn) == len(rf._PHASE_PORTRAIT_LAYOUTS["halfcheetah"])
 
+    def test_phase_portraits_on_walker2d(self):
+        traj = np.random.randn(5, 18)  # 17 obs + reward, same shape as halfcheetah
+        fig = rf.plot_joint_phase_portraits(traj, traj, "mujoco/walker2d/medium-v0")
+        assert isinstance(fig, Figure)
+        drawn = [ax for ax in fig.axes if ax.has_data()]
+        assert len(drawn) == len(rf._PHASE_PORTRAIT_LAYOUTS["walker2d"])
+
     def test_phase_portraits_on_hopper(self):
         traj = np.random.randn(5, 12)  # 11 obs + reward, as build_rollout_figures passes
         fig = rf.plot_joint_phase_portraits(traj, traj, "mujoco/hopper/medium-v0")

@@ -4,7 +4,8 @@ These ground the aggregate trajectory-MSE curves with a *visual* check of how a 
 rollout diverges from the real trajectory: per-feature time-series (does it drift, blow up,
 or stay calibrated within the ensemble spread?), a per-feature normalized-error heatmap
 (which dimensions drive the compounding error, and when), and — for envs with a registered
-layout (HalfCheetah, Hopper, Adroit pen) — genuine phase portraits (position/angle vs velocity).
+layout (HalfCheetah, Hopper, Walker2d, Adroit pen) — genuine phase portraits (position/angle
+vs velocity).
 
 All functions are pure: they take numpy arrays and return a ``matplotlib.figure.Figure``
 (or ``None`` when the plot does not apply), and never touch W&B or global pyplot state.
@@ -30,6 +31,10 @@ import numpy as np
 # Hopper: obs = qpos[1:] (5) then qvel (6); a position at index i pairs with its velocity at
 #   i + 6. Height (obs[0]) and torso angle (obs[1]) govern falling/termination, so they are
 #   plotted alongside the three actuated joints (thigh, leg, foot).
+# Walker2d: obs = qpos[1:] (8) then qvel (9) — the same shape as HalfCheetah, so a position at
+#   index i pairs with its velocity at i + 9. Like Hopper it can fall, so height (obs[0]) and
+#   torso angle (obs[1]) are plotted alongside the six actuated leg joints (right/left
+#   thigh, leg, foot).
 _PHASE_PORTRAIT_LAYOUTS: dict[str, list[tuple[int, int, str]]] = {
     "halfcheetah": [
         (2, 11, "bthigh"),
@@ -38,6 +43,16 @@ _PHASE_PORTRAIT_LAYOUTS: dict[str, list[tuple[int, int, str]]] = {
         (5, 14, "fthigh"),
         (6, 15, "fshin"),
         (7, 16, "ffoot"),
+    ],
+    "walker2d": [
+        (0, 9, "height"),
+        (1, 10, "torso ang"),
+        (2, 11, "r thigh"),
+        (3, 12, "r leg"),
+        (4, 13, "r foot"),
+        (5, 14, "l thigh"),
+        (6, 15, "l leg"),
+        (7, 16, "l foot"),
     ],
     "hopper": [
         (0, 6, "height"),
