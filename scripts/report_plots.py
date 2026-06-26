@@ -113,10 +113,26 @@ def _curve_for_checkpoint(
             f"{Path(ckpt_path).name}: world-model class {type(wm).__name__} has no "
             "compute_traj_mse (only EnsembleMLP supports trajectory rollout eval)."
         )
-    eval_eps, _ = _resolve_eval_eps(dataset_id, on, wm, val_split, split_seed)
+    eval_eps, info = _resolve_eval_eps(dataset_id, on, wm, val_split, split_seed)
+    _assert_env_match(ckpt_path, wm, info, dataset_id)
     _, _, curve = compute(eval_eps, horizon)
     jax.block_until_ready(curve)
     return np.asarray(curve, dtype=np.float64)  # (T,)
+
+
+def _assert_env_match(ckpt_path: str, wm, info, dataset_id: str) -> None:
+    """Fail fast (and readably) when a checkpoint's env differs from the eval dataset's.
+
+    Otherwise the obs+action dim mismatch surfaces as a cryptic ``dot_general`` shape
+    error deep in the world-model forward. Usually means ``dataset_id`` was left pointing
+    at the wrong env (e.g. a HalfCheetah id copy-pasted into a Hopper plot block).
+    """
+    if (wm.obs_dim, wm.act_dim) != (info.obs_dim, info.act_dim):
+        raise ValueError(
+            f"env mismatch for {Path(ckpt_path).name}: checkpoint is "
+            f"obs/act=({wm.obs_dim},{wm.act_dim}) but dataset_id='{dataset_id}' is "
+            f"({info.obs_dim},{info.act_dim}). Set dataset_id to the checkpoint's env."
+        )
 
 
 def _aggregate_seeds(curves: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray | None]:
@@ -155,7 +171,9 @@ class CurvePlot:
 
 
 # ── plot builders ────────────────────────────────────────────────────────────────
-def build_curve_plot(spec: CurvePlot, outdir: Path) -> None:
+def _draw_curves(spec: CurvePlot, ax, ylabel: bool = True, legend: bool = True) -> None:
+    """Draw one CurvePlot's overlaid curves onto ``ax`` (shared by the single-figure and
+    multi-panel-grid builders)."""
     n_ckpts = sum(len(g.checkpoints) for g in spec.groups)
     if spec.on == "val" and n_ckpts > 1:
         print(
@@ -165,8 +183,6 @@ def build_curve_plot(spec: CurvePlot, outdir: Path) -> None:
             "splits, a fine-tuned model gets scored on episodes it trained on "
             "(leakage) — use on='own_val' instead."
         )
-    fig, ax = plt.subplots(figsize=(5.5, 4.0), constrained_layout=True)
-
     for g in spec.groups:
         curves = [
             _curve_for_checkpoint(
@@ -184,15 +200,36 @@ def build_curve_plot(spec: CurvePlot, outdir: Path) -> None:
             ax.fill_between(
                 steps, mean - band, mean + band, color=line.get_color(), alpha=0.2, lw=0
             )
-
     ax.set_xlabel("rollout step $t$")
-    ax.set_ylabel("trajectory MSE")
+    if ylabel:
+        ax.set_ylabel("trajectory MSE")
     # Rollout steps are integers; suppress matplotlib's fractional (1.5, 2.5, …) ticks.
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     ax.set_yscale(spec.yscale)  # 'linear' by default; 'log' for wide-range compounding
     ax.set_title(spec.title or spec.name)
-    ax.legend()
+    if legend:
+        ax.legend()
+
+
+def build_curve_plot(spec: CurvePlot, outdir: Path) -> None:
+    fig, ax = plt.subplots(figsize=(5.5, 4.0), constrained_layout=True)
+    _draw_curves(spec, ax)
     _save(fig, outdir, spec.name)
+
+
+def build_curve_grid(name: str, panels: list[CurvePlot], outdir: Path) -> None:
+    """Horizontally-stacked 1×N figure: one CurvePlot panel per column (e.g. one env each).
+
+    Panels keep independent y-axes (envs differ in MSE scale); the 'trajectory MSE' label
+    and legend are drawn once (leftmost panel) since the groups are shared across panels.
+    """
+    n = len(panels)
+    fig, axes = plt.subplots(
+        1, n, figsize=(4.8 * n, 4.0), squeeze=False, constrained_layout=True
+    )
+    for i, panel in enumerate(panels):
+        _draw_curves(panel, axes[0][i], ylabel=(i == 0), legend=(i == 0))
+    _save(fig, outdir, name)
 
 
 def dump_rollout_figures(
@@ -207,6 +244,7 @@ def dump_rollout_figures(
         print(f"  skip {Path(ckpt_path).name}: no compute_traj_grounding")
         return
     eval_eps, info = _resolve_eval_eps(dataset_id, on, wm, val_split, split_seed)
+    _assert_env_match(ckpt_path, wm, info, dataset_id)
     *_, figures = compute(eval_eps, horizon, info.dataset_id)
     tag = prefix or Path(ckpt_path).parent.name
     for name, figure in figures.items():
@@ -223,28 +261,39 @@ def _save(fig, outdir: Path, name: str) -> None:
 
 
 # ── config loading ───────────────────────────────────────────────────────────────
-def _load_config(path: str) -> tuple[list[CurvePlot], list[dict], Path]:
+def _parse_curve_spec(c: dict, default_name: str = "panel") -> CurvePlot:
+    return CurvePlot(
+        name=c.get("name", c.get("title", default_name)),
+        dataset_id=c["dataset_id"],
+        horizon=int(c["horizon"]),
+        # 'eval_on' not 'on': YAML 1.1 parses a bare 'on' key as boolean True.
+        on=c.get("eval_on", "own_val"),
+        val_split=float(c.get("val_split", 0.1)),
+        split_seed=int(c.get("split_seed", 0)),
+        title=c.get("title"),
+        band=c.get("band", "std"),
+        yscale=c.get("yscale", "linear"),
+        groups=[ModelGroup(**g) for g in c["groups"]],
+    )
+
+
+def _load_config(
+    path: str,
+) -> tuple[list[CurvePlot], list[tuple[str, list[CurvePlot]]], list[dict], Path]:
     raw = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
     assert isinstance(raw, dict)
     outdir = Path(raw.get("outdir", "report_figures"))
-    curve_specs = [
-        CurvePlot(
-            name=c["name"],
-            dataset_id=c["dataset_id"],
-            horizon=int(c["horizon"]),
-            # 'eval_on' not 'on': YAML 1.1 parses a bare 'on' key as boolean True.
-            on=c.get("eval_on", "own_val"),
-            val_split=float(c.get("val_split", 0.1)),
-            split_seed=int(c.get("split_seed", 0)),
-            title=c.get("title"),
-            band=c.get("band", "std"),
-            yscale=c.get("yscale", "linear"),
-            groups=[ModelGroup(**g) for g in c["groups"]],
+    curve_specs = [_parse_curve_spec(c) for c in raw.get("curve_plots", [])]
+    # Each grid is (name, [panel CurvePlot]); panels render side by side in one figure.
+    grid_specs = [
+        (
+            g["name"],
+            [_parse_curve_spec(p, f"{g['name']}_{i}") for i, p in enumerate(g["panels"])],
         )
-        for c in raw.get("curve_plots", [])
+        for g in raw.get("curve_grids", [])
     ]
     figure_specs = list(raw.get("rollout_figures", []))
-    return curve_specs, figure_specs, outdir
+    return curve_specs, grid_specs, figure_specs, outdir
 
 
 def _figure_name(spec: dict) -> str:
@@ -276,12 +325,15 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    curve_specs, figure_specs, outdir = _load_config(args.config)
+    curve_specs, grid_specs, figure_specs, outdir = _load_config(args.config)
 
     if args.list:
         print("curve_plots:")
         for spec in curve_specs:
             print(f"  {spec.name}")
+        print("curve_grids:")
+        for gname, panels in grid_specs:
+            print(f"  {gname}  ({', '.join(p.dataset_id for p in panels)})")
         print("rollout_figures:")
         for spec in figure_specs:
             print(f"  {_figure_name(spec)}")
@@ -296,6 +348,12 @@ def main() -> None:
                 continue
             print(f"[curve] {spec.name}  ({spec.dataset_id}, h={spec.horizon}, on={spec.on})")
             build_curve_plot(spec, outdir)
+            ran += 1
+        for gname, panels in grid_specs:
+            if not _selected(gname, patterns):
+                continue
+            print(f"[grid] {gname}  ({len(panels)} panels)")
+            build_curve_grid(gname, panels, outdir)
             ran += 1
 
     if args.only != "validation":
