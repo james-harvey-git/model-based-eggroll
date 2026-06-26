@@ -36,6 +36,7 @@ from pathlib import Path
 
 import jax
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 from omegaconf import OmegaConf
 
@@ -150,6 +151,7 @@ class CurvePlot:
     split_seed: int = 0  # used only when on='val' (the forced common split seed)
     title: str | None = None
     band: str = "std"  # 'std' | 'sem' | 'none'
+    yscale: str = "linear"  # matplotlib y-axis scale: 'linear' (default) | 'log' | 'symlog'
 
 
 # ── plot builders ────────────────────────────────────────────────────────────────
@@ -185,7 +187,9 @@ def build_curve_plot(spec: CurvePlot, outdir: Path) -> None:
 
     ax.set_xlabel("rollout step $t$")
     ax.set_ylabel("trajectory MSE")
-    ax.set_yscale("log")  # compounding error spans orders of magnitude
+    # Rollout steps are integers; suppress matplotlib's fractional (1.5, 2.5, …) ticks.
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.set_yscale(spec.yscale)  # 'linear' by default; 'log' for wide-range compounding
     ax.set_title(spec.title or spec.name)
     ax.legend()
     _save(fig, outdir, spec.name)
@@ -234,6 +238,7 @@ def _load_config(path: str) -> tuple[list[CurvePlot], list[dict], Path]:
             split_seed=int(c.get("split_seed", 0)),
             title=c.get("title"),
             band=c.get("band", "std"),
+            yscale=c.get("yscale", "linear"),
             groups=[ModelGroup(**g) for g in c["groups"]],
         )
         for c in raw.get("curve_plots", [])
