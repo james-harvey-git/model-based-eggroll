@@ -26,7 +26,7 @@ walltime_bars:
     runs: *bptt_t5
   - label: "EGGROLL (T=5)"  # single seed. 1dvuoida uses ADAM; swap to muhqvqcv (adamw,
     color: C1               # still running) once it finishes, to match the BPTT optimizer.
-    runs: [1dvuoida]
+    runs: [muhqvqcv]
 
 # Grad norm: overlay T=5 vs T=50 to show the explosion scaling with horizon.
 grad_norm_groups:
