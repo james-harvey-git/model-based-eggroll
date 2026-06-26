@@ -1,0 +1,41 @@
+# Config for scripts/training_plots.py — W&B-sourced training telemetry.
+# Run ids verified from the model-based-eggroll W&B project (horizon/trainer/optimizer
+# read off each run's config). Use `--list-runs <substr>` to relist.
+
+wandb:
+  entity: model-based-eggroll
+  project: model-based-eggroll
+
+outdir: report_figures
+
+walltime_units: min        # 'min' | 'sec'
+walltime_yscale: log       # log: BPTT bars are visible next to the ~475x EGGROLL bar
+grad_norm_yscale: log      # grad norms span orders of magnitude → log
+
+# Reusable run-id groups (anchors), referenced below.
+_bptt_t5: &bptt_t5  [ia3ij56p, r54splhh, fnpzlpxr, 0oa671dg, 0mvjzyxe, 1clctitu, m8ztwryt, icegf4zo, r5mhqev4, e91w3jju]
+_bptt_t50: &bptt_t50 [xldtbqiy, a22u8m6e, qah1mcuv, mvjubu3f, a6kap81x, svb5wfxz, zsxd4p9l, 9odqji1c, ugyky822, 6x8st6m0]
+
+# Wall-clock bar: one bar per group (mean over seeds; error bar if >1 seed).
+walltime_bars:
+  - label: "BPTT (T=50)"    # combined backprop->bptt, horizon=50, adamw — 01:20 batch
+    color: C2
+    runs: *bptt_t50
+  - label: "BPTT (T=5)"     # combined backprop->bptt, horizon=5, adamw — 23:45 + 00:21 batch
+    color: C0
+    runs: *bptt_t5
+  - label: "EGGROLL (T=5)"  # single seed. 1dvuoida uses ADAM; swap to muhqvqcv (adamw,
+    color: C1               # still running) once it finishes, to match the BPTT optimizer.
+    runs: [1dvuoida]
+
+# Grad norm: overlay T=5 vs T=50 to show the explosion scaling with horizon.
+grad_norm_groups:
+  - label: "BPTT (T=5)"
+    color: C0
+    runs: *bptt_t5
+  - label: "BPTT (T=50)"
+    color: C2
+    runs: *bptt_t50
+
+# Clip fraction: ~1.0 for every config, so one group (BPTT T=5) suffices.
+clip_fraction_runs: *bptt_t5
